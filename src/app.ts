@@ -4,9 +4,14 @@ const canvas = document.querySelector<HTMLCanvasElement>("#renderCanvas");
 if (!canvas) throw new Error("Canvas element #renderCanvas was not found.");
 
 const renderCanvas = canvas;
+const splatSource = new URLSearchParams(window.location.search).get("splat") ?? undefined;
+
 async function main(): Promise<void> {
   try {
-    const viewer = await GaussianSplatViewer.create({ canvas: renderCanvas });
+    const viewer = await GaussianSplatViewer.create({
+      canvas: renderCanvas,
+      source: splatSource,
+    });
     viewer.start();
   } catch (error) {
     console.error(error);

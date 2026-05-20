@@ -1,3 +1,5 @@
+import { CameraUniforms } from "../camera/camera-uniforms";
+import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 import RenderPipeline from "./render-pipeline";
 
@@ -10,13 +12,21 @@ export class GaussianRenderer {
     this.pipeline = new RenderPipeline(gpu);
   }
 
-  public render(): void {
+  public setSplatBuffer(splatBuffer: SplatBuffer): void {
+    this.pipeline.setSplatBuffer(splatBuffer);
+  }
+
+  public getCameraBindGroupLayout(): GPUBindGroupLayout {
+    return this.pipeline.getCameraBindGroupLayout();
+  }
+
+  public render(cameraUniforms: CameraUniforms): void {
     this.gpu.resizeIfNeeded();
 
     const encoder = this.gpu.beginFrame();
     const textureView = this.gpu.getCurrentTextureView();
 
-    this.pipeline.renderFrame(encoder, textureView);
+    this.pipeline.renderFrame(encoder, textureView, cameraUniforms);
     this.gpu.submit(encoder);
   }
 

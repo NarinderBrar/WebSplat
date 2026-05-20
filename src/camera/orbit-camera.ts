@@ -18,7 +18,11 @@ export class OrbitCamera {
   private maxRadius: number;
   private canvas: HTMLCanvasElement;
 
-  constructor(device: GPUDevice, canvas: HTMLCanvasElement) {
+  constructor(
+    device: GPUDevice,
+    canvas: HTMLCanvasElement,
+    cameraBindGroupLayout: GPUBindGroupLayout,
+  ) {
     this.canvas = canvas;
     this.uniforms = new CameraUniforms(device);
     this.alpha = Math.PI / 4;
@@ -28,7 +32,7 @@ export class OrbitCamera {
     this.minRadius = 3;
     this.maxRadius = 10;
 
-    this.uniforms.createBuffers();
+    this.uniforms.createBuffers(cameraBindGroupLayout);
   }
 
   public getState(): OrbitCameraState {

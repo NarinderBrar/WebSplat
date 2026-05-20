@@ -1,18 +1,60 @@
 import splatShader from "../shaders/splat.wgsl?raw";
+import { CameraUniforms } from "../camera/camera-uniforms";
+import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 
 export default class RenderPipeline {
+  private readonly device: GPUDevice;
+  private readonly cameraBindGroupLayout: GPUBindGroupLayout;
+  private readonly splatBindGroupLayout: GPUBindGroupLayout;
   private readonly pipeline: GPURenderPipeline;
+  private splatBindGroup: GPUBindGroup | null = null;
+  private splatCount = 0;
 
   constructor(gpu: GpuContext) {
+    this.device = gpu.device;
+
     const shaderModule = gpu.device.createShaderModule({
-      label: "DebugSplatShader",
+      label: "SplatParticleShader",
       code: splatShader,
     });
 
+    this.cameraBindGroupLayout = gpu.device.createBindGroupLayout({
+      label: "CameraBindGroupLayout",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "uniform" },
+        },
+      ],
+    });
+
+    this.splatBindGroupLayout = gpu.device.createBindGroupLayout({
+      label: "SplatBindGroupLayout",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+      ],
+    });
+
     this.pipeline = gpu.device.createRenderPipeline({
-      label: "DebugSplatPipeline",
-      layout: "auto",
+      label: "SplatParticlePipeline",
+      layout: gpu.device.createPipelineLayout({
+        label: "SplatParticlePipelineLayout",
+        bindGroupLayouts: [
+          this.cameraBindGroupLayout,
+          this.splatBindGroupLayout,
+        ],
+      }),
       vertex: {
         module: shaderModule,
         entryPoint: "vsMain",
@@ -27,12 +69,47 @@ export default class RenderPipeline {
         ],
       },
       primitive: {
-        topology: "triangle-list",
+        topology: "point-list",
       },
     });
   }
 
-  renderFrame(encoder: GPUCommandEncoder, textureView: GPUTextureView): void {
+  setSplatBuffer(splatBuffer: SplatBuffer): void {
+    const positionBuffer = splatBuffer.getPositionBuffer();
+    const colorBuffer = splatBuffer.getColorBuffer();
+
+    if (!positionBuffer || !colorBuffer) {
+      throw new Error("Splat positions and colors must be uploaded before binding.");
+    }
+
+    this.splatBindGroup = this.device.createBindGroup({
+      label: "SplatBindGroup",
+      layout: this.splatBindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: { buffer: positionBuffer },
+        },
+        {
+          binding: 1,
+          resource: { buffer: colorBuffer },
+        },
+      ],
+    });
+    this.splatCount = splatBuffer.getCount();
+  }
+
+  getCameraBindGroupLayout(): GPUBindGroupLayout {
+    return this.cameraBindGroupLayout;
+  }
+
+  renderFrame(
+    encoder: GPUCommandEncoder,
+    textureView: GPUTextureView,
+    cameraUniforms: CameraUniforms,
+  ): void {
+    const cameraBindGroup = cameraUniforms.getBindGroup();
+
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [
         {
@@ -50,7 +127,13 @@ export default class RenderPipeline {
     });
 
     renderPass.setPipeline(this.pipeline);
-    renderPass.draw(3);
+
+    if (cameraBindGroup && this.splatBindGroup && this.splatCount > 0) {
+      renderPass.setBindGroup(0, cameraBindGroup);
+      renderPass.setBindGroup(1, this.splatBindGroup);
+      renderPass.draw(this.splatCount);
+    }
+
     renderPass.end();
   }
 

@@ -21,21 +21,13 @@ export class CameraUniforms {
     };
   }
 
-  public createBuffers(): void {
+  public createBuffers(bindGroupLayout: GPUBindGroupLayout): void {
     this.buffer = this.device.createBuffer({
       size: 48 * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    this.bindGroupLayout = this.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          buffer: { type: "uniform" },
-        },
-      ],
-    });
+    this.bindGroupLayout = bindGroupLayout;
 
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
