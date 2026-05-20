@@ -1,21 +1,39 @@
-import type { WebGPUEngine } from "@babylonjs/core/Engines/webgpuEngine";
-
 export class GpuContext {
-  public readonly engine: WebGPUEngine;
-
+  public readonly adapter: GPUAdapter;
   public readonly device: GPUDevice;
-
   public readonly canvas: HTMLCanvasElement;
-
   public readonly context: GPUCanvasContext;
-
   public readonly presentationFormat: GPUTextureFormat;
 
-  constructor(engine: WebGPUEngine) {
-    const canvas = engine.getRenderingCanvas();
+  private constructor(
+    adapter: GPUAdapter,
+    device: GPUDevice,
+    canvas: HTMLCanvasElement,
+    context: GPUCanvasContext,
+    presentationFormat: GPUTextureFormat,
+  ) {
+    this.adapter = adapter;
+    this.device = device;
+    this.canvas = canvas;
+    this.context = context;
+    this.presentationFormat = presentationFormat;
+  }
 
-    if (!canvas) {
-      throw new Error("Rendering canvas was not found.");
+  static async create(canvas: HTMLCanvasElement): Promise<GpuContext> {
+    if (!navigator.gpu) {
+      throw new Error("WebGPU is not available in this browser.");
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+
+    if (!adapter) {
+      throw new Error("WebGPU adapter could not be created.");
+    }
+
+    const device = await adapter.requestDevice();
+
+    if (!device) {
+      throw new Error("WebGPU device could not be created.");
     }
 
     const context = canvas.getContext("webgpu");
@@ -24,17 +42,13 @@ export class GpuContext {
       throw new Error("WebGPU context could not be created.");
     }
 
-    this.engine = engine;
+    const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
-    this.canvas = canvas;
+    const gpu = new GpuContext(adapter, device, canvas, context, presentationFormat);
+    gpu.configure();
+    gpu.resize();
 
-    this.context = context;
-
-    this.device = engine._device;
-
-    this.presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-
-    this.configure();
+    return gpu;
   }
 
   private configure(): void {
@@ -45,18 +59,23 @@ export class GpuContext {
     });
   }
 
-  public resize(): void {
+  public resize(): boolean {
     const devicePixelRatio = window.devicePixelRatio || 1;
-
-    const width = Math.floor(this.canvas.clientWidth * devicePixelRatio);
-    const height = Math.floor(this.canvas.clientHeight * devicePixelRatio);
+    const width = Math.max(1, Math.floor(this.canvas.clientWidth * devicePixelRatio));
+    const height = Math.max(1, Math.floor(this.canvas.clientHeight * devicePixelRatio));
 
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
-
       this.configure();
+      return true;
     }
+
+    return false;
+  }
+
+  public resizeIfNeeded(): boolean {
+    return this.resize();
   }
 
   public beginFrame(): GPUCommandEncoder {
@@ -71,5 +90,10 @@ export class GpuContext {
 
   public getCurrentTextureView(): GPUTextureView {
     return this.context.getCurrentTexture().createView();
+  }
+
+  public dispose(): void {
+    this.context.unconfigure();
+    this.device.destroy();
   }
 }

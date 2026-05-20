@@ -1,29 +1,36 @@
-import type { Scene } from "@babylonjs/core/scene";
-import type { WebGPUEngine } from "@babylonjs/core/Engines/webgpuEngine";
-import BabylonEngine from "../engine/babylon-engine.ts";
-import ViewerScene from "../engine/viewer-scene.ts";
+import { OrbitCamera } from "../camera/orbit-camera";
+import { GpuContext } from "../renderer/gpu-context";
+import { GaussianRenderer } from "../renderer/gaussian-renderer";
 
 export interface GaussianSplatViewerOptions {
   canvas: HTMLCanvasElement;
 }
 
 export default class GaussianSplatViewer {
-  private readonly engine: WebGPUEngine;
-  private readonly scene: Scene;
+  private readonly gpu: GpuContext;
+  private readonly renderer: GaussianRenderer;
+  private readonly camera: OrbitCamera;
+  private rafId: number | null = null;
   private isRunning = false;
 
-  private constructor(engine: WebGPUEngine, scene: Scene) {
-    this.engine = engine;
-    this.scene = scene;
+  private constructor(
+    gpu: GpuContext,
+    renderer: GaussianRenderer,
+    camera: OrbitCamera,
+  ) {
+    this.gpu = gpu;
+    this.renderer = renderer;
+    this.camera = camera;
   }
 
   static async create(
     options: GaussianSplatViewerOptions,
   ): Promise<GaussianSplatViewer> {
-    const engine = await BabylonEngine.create(options.canvas);
-    const viewerScene = new ViewerScene(engine, options.canvas);
+    const gpu = await GpuContext.create(options.canvas);
+    const renderer = new GaussianRenderer(gpu);
+    const camera = new OrbitCamera(gpu.device, gpu.canvas);
 
-    return new GaussianSplatViewer(engine, viewerScene.scene);
+    return new GaussianSplatViewer(gpu, renderer, camera);
   }
 
   start(): void {
@@ -32,10 +39,7 @@ export default class GaussianSplatViewer {
     }
 
     this.isRunning = true;
-    this.engine.runRenderLoop(() => {
-      this.scene.render();
-    });
-
+    this.loop();
     window.addEventListener("resize", this.resize);
   }
 
@@ -44,18 +48,29 @@ export default class GaussianSplatViewer {
       return;
     }
 
-    this.engine.stopRenderLoop();
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+
     window.removeEventListener("resize", this.resize);
     this.isRunning = false;
   }
 
   dispose(): void {
     this.stop();
-    this.scene.dispose();
-    this.engine.dispose();
+    this.camera.dispose();
+    this.renderer.dispose();
+    this.gpu.dispose();
   }
 
   private readonly resize = (): void => {
-    this.engine.resize();
+    this.gpu.resize();
+  };
+
+  private readonly loop = (): void => {
+    this.camera.update();
+    this.renderer.render();
+    this.rafId = requestAnimationFrame(this.loop);
   };
 }

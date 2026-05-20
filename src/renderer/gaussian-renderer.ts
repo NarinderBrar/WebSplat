@@ -1,39 +1,26 @@
 import { GpuContext } from "./gpu-context";
-
-export interface GaussianRendererOptions {
-  canvas: HTMLCanvasElement;
-}
+import RenderPipeline from "./render-pipeline";
 
 export class GaussianRenderer {
   private readonly gpu: GpuContext;
+  private readonly pipeline: RenderPipeline;
 
   constructor(gpu: GpuContext) {
     this.gpu = gpu;
+    this.pipeline = new RenderPipeline(gpu);
   }
 
   public render(): void {
-    const encoder = this.gpu.beginFrame();
+    this.gpu.resizeIfNeeded();
 
+    const encoder = this.gpu.beginFrame();
     const textureView = this.gpu.getCurrentTextureView();
 
-    const renderPass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: textureView,
-          clearValue: {
-            r: 0.03,
-            g: 0.05,
-            b: 0.07,
-            a: 1,
-          },
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-    });
-
-    renderPass.end();
-
+    this.pipeline.renderFrame(encoder, textureView);
     this.gpu.submit(encoder);
+  }
+
+  public dispose(): void {
+    this.pipeline.dispose();
   }
 }

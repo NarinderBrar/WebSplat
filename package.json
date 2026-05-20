@@ -1,5 +1,5 @@
 {
-  "name": "websplat-babylon-webgpu-starter",
+  "name": "websplat",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,10 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@babylonjs/core": "^7.54.2",
     "wesl": "^0.6.49"
   },
   "devDependencies": {
+    "@webgpu/types": "^0.1.70",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }
