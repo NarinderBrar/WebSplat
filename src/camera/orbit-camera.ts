@@ -1,3 +1,7 @@
+import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
+import { NullEngine } from "@babylonjs/core/Engines/nullEngine";
+import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Scene } from "@babylonjs/core/scene";
 import { CameraUniforms } from "./camera-uniforms";
 
 export interface OrbitCameraState {
@@ -10,13 +14,14 @@ export interface OrbitCameraState {
 export class OrbitCamera {
   public readonly uniforms: CameraUniforms;
 
-  private alpha: number;
-  private beta: number;
-  private radius: number;
-  private target: [number, number, number];
-  private minRadius: number;
-  private maxRadius: number;
-  private canvas: HTMLCanvasElement;
+  private readonly engine: NullEngine;
+  private readonly scene: Scene;
+  private readonly camera: ArcRotateCamera;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly viewMatrix = new Float32Array(16);
+  private readonly projectionMatrix = new Float32Array(16);
+  private readonly viewProjectionMatrix = new Float32Array(16);
+  private readonly babylonProjection = Matrix.Identity();
 
   constructor(
     device: GPUDevice,
@@ -24,109 +29,109 @@ export class OrbitCamera {
     cameraBindGroupLayout: GPUBindGroupLayout,
   ) {
     this.canvas = canvas;
-    this.uniforms = new CameraUniforms(device);
-    this.alpha = Math.PI / 4;
-    this.beta = Math.PI / 3;
-    this.radius = 6;
-    this.target = [0, 0, 0];
-    this.minRadius = 3;
-    this.maxRadius = 10;
+    this.engine = new NullEngine({
+      renderWidth: canvas.width,
+      renderHeight: canvas.height,
+      textureSize: Math.max(canvas.width, canvas.height, 512),
+      deterministicLockstep: false,
+      lockstepMaxSteps: 4,
+      renderingCanvas: canvas,
+    });
+    this.scene = new Scene(this.engine);
+    this.camera = new ArcRotateCamera(
+      "viewerCamera",
+      -Math.PI / 2,
+      Math.PI / 2.1,
+      1.25,
+      Vector3.Zero(),
+      this.scene,
+    );
+    this.camera.lowerRadiusLimit = 0.02;
+    this.camera.upperRadiusLimit = 10000;
+    this.camera.minZ = 0.1;
+    this.camera.maxZ = 10000;
+    this.camera.fov = Math.PI / 4;
+    this.camera.wheelPrecision = 20;
+    this.camera.panningSensibility = 80;
+    this.camera.attachControl(canvas, true);
 
+    this.uniforms = new CameraUniforms(device);
     this.uniforms.createBuffers(cameraBindGroupLayout);
   }
 
   public getState(): OrbitCameraState {
     return {
-      alpha: this.alpha,
-      beta: this.beta,
-      radius: this.radius,
-      target: [...this.target],
+      alpha: this.camera.alpha,
+      beta: this.camera.beta,
+      radius: this.camera.radius,
+      target: [
+        this.camera.target.x,
+        this.camera.target.y,
+        this.camera.target.z,
+      ],
     };
   }
 
   public setState(state: Partial<OrbitCameraState>): void {
-    if (state.alpha !== undefined) this.alpha = state.alpha;
-    if (state.beta !== undefined) this.beta = state.beta;
-    if (state.radius !== undefined) this.radius = state.radius;
-    if (state.target !== undefined) this.target = state.target;
+    if (state.alpha !== undefined) this.camera.alpha = state.alpha;
+    if (state.beta !== undefined) this.camera.beta = state.beta;
+    if (state.radius !== undefined) this.camera.radius = state.radius;
 
-    this.radius = Math.max(this.minRadius, Math.min(this.maxRadius, this.radius));
-    this.beta = Math.max(0.1, Math.min(Math.PI - 0.1, this.beta));
+    if (state.target !== undefined) {
+      this.camera.target.set(
+        state.target[0],
+        state.target[1],
+        state.target[2],
+      );
+    }
+  }
+
+  public getBabylonCamera(): ArcRotateCamera {
+    return this.camera;
+  }
+
+  public getBabylonScene(): Scene {
+    return this.scene;
   }
 
   public update(): void {
-    const position = this.getPosition();
+    this.camera.update();
+    this.camera.getViewMatrix(true).copyToArray(this.viewMatrix, 0);
 
-    const viewMatrix = this.lookAt(position, this.target);
-    const projectionMatrix = this.perspective();
+    Matrix.PerspectiveFovLHToRef(
+      this.camera.fov,
+      this.canvas.width / this.canvas.height,
+      this.camera.minZ,
+      this.camera.maxZ,
+      this.babylonProjection,
+      true,
+      true,
+    );
+    this.babylonProjection.copyToArray(this.projectionMatrix, 0);
+    this.multiplyMatrices(
+      this.projectionMatrix,
+      this.viewMatrix,
+      this.viewProjectionMatrix,
+    );
 
-    const viewProjection = new Float32Array(16);
-    this.multiplyMatrices(projectionMatrix, viewMatrix, viewProjection);
-
-    this.uniforms.updateView(viewMatrix);
-    this.uniforms.updateProjection(projectionMatrix);
-    this.uniforms.updateViewProjection(viewProjection);
+    this.uniforms.updateView(this.viewMatrix);
+    this.uniforms.updateProjection(this.projectionMatrix);
+    this.uniforms.updateViewProjection(this.viewProjectionMatrix);
     this.uniforms.upload();
   }
 
-  private getPosition(): [number, number, number] {
-    const x = this.target[0] + this.radius * Math.sin(this.beta) * Math.cos(this.alpha);
-    const y = this.target[1] + this.radius * Math.cos(this.beta);
-    const z = this.target[2] + this.radius * Math.sin(this.beta) * Math.sin(this.alpha);
-    return [x, y, z];
+  public dispose(): void {
+    this.camera.detachControl();
+    this.uniforms.dispose();
+    this.scene.dispose();
+    this.engine.dispose();
   }
 
-  private lookAt(eye: [number, number, number], target: [number, number, number]): Float32Array {
-    const matrix = new Float32Array(16);
-
-    const zAxis = this.normalize([
-      eye[0] - target[0],
-      eye[1] - target[1],
-      eye[2] - target[2],
-    ]);
-    const xAxis = this.normalize(this.cross([0, 1, 0], zAxis));
-    const yAxis = this.cross(zAxis, xAxis);
-
-    matrix[0] = xAxis[0];
-    matrix[1] = yAxis[0];
-    matrix[2] = zAxis[0];
-    matrix[3] = 0;
-    matrix[4] = xAxis[1];
-    matrix[5] = yAxis[1];
-    matrix[6] = zAxis[1];
-    matrix[7] = 0;
-    matrix[8] = xAxis[2];
-    matrix[9] = yAxis[2];
-    matrix[10] = zAxis[2];
-    matrix[11] = 0;
-    matrix[12] = -this.dot(xAxis, eye);
-    matrix[13] = -this.dot(yAxis, eye);
-    matrix[14] = -this.dot(zAxis, eye);
-    matrix[15] = 1;
-
-    return matrix;
-  }
-
-  private perspective(): Float32Array {
-    const matrix = new Float32Array(16);
-    const aspect = this.canvas.width / this.canvas.height;
-    const fov = Math.PI / 4;
-    const near = 0.1;
-    const far = 100;
-
-    const f = 1 / Math.tan(fov / 2);
-    const rangeInv = 1 / (near - far);
-
-    matrix[0] = f / aspect;
-    matrix[5] = f;
-    matrix[10] = far * rangeInv;
-    matrix[11] = -1;
-    matrix[14] = far * near * rangeInv;
-
-    return matrix;
-  }
-
-  private multiplyMatrices(a: Float32Array, b: Float32Array, out: Float32Array): void {
+  private multiplyMatrices(
+    a: Float32Array,
+    b: Float32Array,
+    out: Float32Array,
+  ): void {
     for (let i = 0; i < 4; i++) {
       for (let j = 0; j < 4; j++) {
         out[i * 4 + j] = 0;
@@ -135,26 +140,5 @@ export class OrbitCamera {
         }
       }
     }
-  }
-
-  private normalize(v: [number, number, number]): [number, number, number] {
-    const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
-  }
-
-  private cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-    return [
-      a[1] * b[2] - a[2] * b[1],
-      a[2] * b[0] - a[0] * b[2],
-      a[0] * b[1] - a[1] * b[0],
-    ];
-  }
-
-  private dot(a: [number, number, number], b: [number, number, number]): number {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  }
-
-  public dispose(): void {
-    this.uniforms.dispose();
   }
 }

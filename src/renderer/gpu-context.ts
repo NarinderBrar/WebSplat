@@ -24,7 +24,7 @@ export class GpuContext {
       throw new Error("WebGPU is not available in this browser.");
     }
 
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = (await navigator.gpu.requestAdapter()) as unknown as GPUAdapter | null;
 
     if (!adapter) {
       throw new Error("WebGPU adapter could not be created.");

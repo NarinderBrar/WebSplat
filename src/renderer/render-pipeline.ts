@@ -1,3 +1,5 @@
+import debugPlaneShader from "../shaders/debug-plane.wgsl?raw";
+import debugAxisShader from "../shaders/debug-axis.wgsl?raw";
 import splatShader from "../shaders/splat.wgsl?raw";
 import { CameraUniforms } from "../camera/camera-uniforms";
 import { SplatBuffer } from "../splats/splatBuffer";
@@ -7,6 +9,7 @@ export default class RenderPipeline {
   private readonly device: GPUDevice;
   private readonly cameraBindGroupLayout: GPUBindGroupLayout;
   private readonly splatBindGroupLayout: GPUBindGroupLayout;
+  private readonly planePipeline: GPURenderPipeline;
   private readonly pipeline: GPURenderPipeline;
   private splatBindGroup: GPUBindGroup | null = null;
   private splatCount = 0;
@@ -17,6 +20,10 @@ export default class RenderPipeline {
     const shaderModule = gpu.device.createShaderModule({
       label: "SplatParticleShader",
       code: splatShader,
+    });
+    const planeShaderModule = gpu.device.createShaderModule({
+      label: "DebugPlaneShader",
+      code: debugPlaneShader,
     });
 
     this.cameraBindGroupLayout = gpu.device.createBindGroupLayout({
@@ -72,6 +79,30 @@ export default class RenderPipeline {
         topology: "point-list",
       },
     });
+
+    this.planePipeline = gpu.device.createRenderPipeline({
+      label: "DebugPlanePipeline",
+      layout: gpu.device.createPipelineLayout({
+        label: "DebugPlanePipelineLayout",
+        bindGroupLayouts: [this.cameraBindGroupLayout],
+      }),
+      vertex: {
+        module: planeShaderModule,
+        entryPoint: "vsMain",
+      },
+      fragment: {
+        module: planeShaderModule,
+        entryPoint: "fsMain",
+        targets: [
+          {
+            format: gpu.presentationFormat,
+          },
+        ],
+      },
+      primitive: {
+        topology: "triangle-list",
+      },
+    });
   }
 
   setSplatBuffer(splatBuffer: SplatBuffer): void {
@@ -79,7 +110,9 @@ export default class RenderPipeline {
     const colorBuffer = splatBuffer.getColorBuffer();
 
     if (!positionBuffer || !colorBuffer) {
-      throw new Error("Splat positions and colors must be uploaded before binding.");
+      throw new Error(
+        "Splat positions and colors must be uploaded before binding.",
+      );
     }
 
     this.splatBindGroup = this.device.createBindGroup({
@@ -126,12 +159,22 @@ export default class RenderPipeline {
       ],
     });
 
-    renderPass.setPipeline(this.pipeline);
+    if (cameraBindGroup) {
+      renderPass.setPipeline(this.planePipeline);
+      renderPass.setBindGroup(0, cameraBindGroup);
+      renderPass.draw(6);
+    }
 
     if (cameraBindGroup && this.splatBindGroup && this.splatCount > 0) {
+      renderPass.setPipeline(this.pipeline);
       renderPass.setBindGroup(0, cameraBindGroup);
       renderPass.setBindGroup(1, this.splatBindGroup);
       renderPass.draw(this.splatCount);
+    }
+
+    if (cameraBindGroup) {
+      renderPass.setBindGroup(0, cameraBindGroup);
+      renderPass.draw(6);
     }
 
     renderPass.end();

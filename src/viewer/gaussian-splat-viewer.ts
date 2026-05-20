@@ -82,6 +82,14 @@ export default class GaussianSplatViewer {
     this.gpu.dispose();
   }
 
+  getBabylonCamera() {
+    return this.camera.getBabylonCamera();
+  }
+
+  getBabylonScene() {
+    return this.camera.getBabylonScene();
+  }
+
   private readonly resize = (): void => {
     this.gpu.resize();
   };
