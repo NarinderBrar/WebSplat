@@ -96,6 +96,7 @@ export default class GaussianSplatViewer {
 
   private readonly loop = (): void => {
     this.camera.update();
+    this.splatBuffer.sortByView(this.camera.getViewMatrix(), this.gpu.device);
     this.renderer.render(this.camera.uniforms);
     this.rafId = requestAnimationFrame(this.loop);
   };

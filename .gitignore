@@ -4,3 +4,4 @@ dist
 public
 *.log
 .DS_Store
+ref

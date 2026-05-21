@@ -66,6 +66,7 @@ function parseInternalSplatBuffer(buffer: ArrayBuffer): SplatData {
 
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
+  const opacities = new Float32Array(count);
   const covariances = new Float32Array(count * 6);
   const shCoefficients = new Float32Array(count * 0);
 
@@ -83,11 +84,13 @@ function parseInternalSplatBuffer(buffer: ArrayBuffer): SplatData {
     colors[i * 3] = Math.exp(dc0);
     colors[i * 3 + 1] = Math.exp(dc1);
     colors[i * 3 + 2] = Math.exp(dc2);
+    opacities[i] = 1;
   }
 
   return {
     positions,
     colors,
+    opacities,
     covariances,
     shCoefficients,
     count,
@@ -100,6 +103,7 @@ function parseStandardSplatBuffer(buffer: ArrayBuffer): SplatData {
 
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
+  const opacities = new Float32Array(count);
   const covariances = new Float32Array(count * 6);
   const shCoefficients = new Float32Array(0);
 
@@ -119,19 +123,23 @@ function parseStandardSplatBuffer(buffer: ArrayBuffer): SplatData {
     const sx = view.getFloat32(offset + 12, true);
     const sy = view.getFloat32(offset + 16, true);
     const sz = view.getFloat32(offset + 20, true);
+    const qx = view.getUint8(offset + 28) / 127.5 - 1;
+    const qy = view.getUint8(offset + 29) / 127.5 - 1;
+    const qz = view.getUint8(offset + 30) / 127.5 - 1;
+    const qw = view.getUint8(offset + 31) / 127.5 - 1;
 
-    covariances[base6] = sx;
-    covariances[base6 + 1] = sy;
-    covariances[base6 + 2] = sz;
+    writeCovariance(covariances, base6, sx, sy, sz, qx, qy, qz, qw, true);
 
     colors[base3] = view.getUint8(offset + 24) / 255;
     colors[base3 + 1] = view.getUint8(offset + 25) / 255;
     colors[base3 + 2] = view.getUint8(offset + 26) / 255;
+    opacities[i] = view.getUint8(offset + 27) / 255;
   }
 
   return {
     positions,
     colors,
+    opacities,
     covariances,
     shCoefficients,
     count,
@@ -258,6 +266,7 @@ function parseBinaryLittleEndianPly(
 
   const positions = new Float32Array(header.vertexCount * 3);
   const colors = new Float32Array(header.vertexCount * 3);
+  const opacities = new Float32Array(header.vertexCount);
   const covariances = new Float32Array(header.vertexCount * 6);
   const shCoefficients = new Float32Array(0);
 
@@ -271,6 +280,7 @@ function parseBinaryLittleEndianPly(
       i,
       positions,
       colors,
+      opacities,
       covariances,
     );
   }
@@ -278,6 +288,7 @@ function parseBinaryLittleEndianPly(
   return {
     positions,
     colors,
+    opacities,
     covariances,
     shCoefficients,
     count: header.vertexCount,
@@ -295,6 +306,7 @@ function parseAsciiPly(buffer: ArrayBuffer, header: PlyHeader): SplatData {
 
   const positions = new Float32Array(header.vertexCount * 3);
   const colors = new Float32Array(header.vertexCount * 3);
+  const opacities = new Float32Array(header.vertexCount);
   const covariances = new Float32Array(header.vertexCount * 6);
   const shCoefficients = new Float32Array(0);
 
@@ -311,6 +323,7 @@ function parseAsciiPly(buffer: ArrayBuffer, header: PlyHeader): SplatData {
       i,
       positions,
       colors,
+      opacities,
       covariances,
     );
   }
@@ -318,6 +331,7 @@ function parseAsciiPly(buffer: ArrayBuffer, header: PlyHeader): SplatData {
   return {
     positions,
     colors,
+    opacities,
     covariances,
     shCoefficients,
     count: header.vertexCount,
@@ -332,6 +346,7 @@ function writePlyVertex(
   index: number,
   positions: Float32Array,
   colors: Float32Array,
+  opacities: Float32Array,
   covariances: Float32Array,
 ): void {
   const get = (name: string, fallback = 0): number => {
@@ -343,7 +358,7 @@ function writePlyVertex(
       : readPlyScalar(view, rowOffset + offset, type);
   };
 
-  writeParsedVertex(get, index, positions, colors, covariances);
+  writeParsedVertex(get, index, positions, colors, opacities, covariances);
 }
 
 function writeAsciiPlyVertex(
@@ -352,6 +367,7 @@ function writeAsciiPlyVertex(
   index: number,
   positions: Float32Array,
   colors: Float32Array,
+  opacities: Float32Array,
   covariances: Float32Array,
 ): void {
   const get = (name: string, fallback = 0): number => {
@@ -359,7 +375,7 @@ function writeAsciiPlyVertex(
     return propertyIndex === undefined ? fallback : values[propertyIndex];
   };
 
-  writeParsedVertex(get, index, positions, colors, covariances);
+  writeParsedVertex(get, index, positions, colors, opacities, covariances);
 }
 
 function writeParsedVertex(
@@ -367,6 +383,7 @@ function writeParsedVertex(
   index: number,
   positions: Float32Array,
   colors: Float32Array,
+  opacities: Float32Array,
   covariances: Float32Array,
 ): void {
   const base3 = index * 3;
@@ -389,9 +406,88 @@ function writeParsedVertex(
     colors[base3 + 2] = clamp01(0.5 + SH_C0 * get("f_dc_2"));
   }
 
-  covariances[base6] = Math.exp(get("scale_0"));
-  covariances[base6 + 1] = Math.exp(get("scale_1"));
-  covariances[base6 + 2] = Math.exp(get("scale_2"));
+  const opacity = get("opacity", Number.NaN);
+  opacities[index] = Number.isFinite(opacity) ? sigmoid(opacity) : 1;
+
+  writeCovariance(
+    covariances,
+    base6,
+    Math.exp(get("scale_0")),
+    Math.exp(get("scale_1")),
+    Math.exp(get("scale_2")),
+    get("rot_1"),
+    get("rot_2"),
+    get("rot_3"),
+    get("rot_0", 1),
+    true,
+  );
+}
+
+function writeCovariance(
+  covariances: Float32Array,
+  base: number,
+  scaleX: number,
+  scaleY: number,
+  scaleZ: number,
+  quatX: number,
+  quatY: number,
+  quatZ: number,
+  quatW: number,
+  flipY: boolean,
+): void {
+  const sx = clampSplatScale(scaleX);
+  const sy = clampSplatScale(scaleY);
+  const sz = clampSplatScale(scaleZ);
+  const length = Math.hypot(quatX, quatY, quatZ, quatW) || 1;
+  const x = quatX / length;
+  const y = quatY / length;
+  const z = quatZ / length;
+  const w = quatW / length;
+
+  const xx = x * x;
+  const yy = y * y;
+  const zz = z * z;
+  const xy = x * y;
+  const xz = x * z;
+  const yz = y * z;
+  const wx = w * x;
+  const wy = w * y;
+  const wz = w * z;
+
+  const r00 = 1 - 2 * (yy + zz);
+  const r01 = 2 * (xy - wz);
+  const r02 = 2 * (xz + wy);
+  const r10 = 2 * (xy + wz);
+  const r11 = 1 - 2 * (xx + zz);
+  const r12 = 2 * (yz - wx);
+  const r20 = 2 * (xz - wy);
+  const r21 = 2 * (yz + wx);
+  const r22 = 1 - 2 * (xx + yy);
+
+  const vx = sx * sx;
+  const vy = sy * sy;
+  const vz = sz * sz;
+
+  covariances[base] = r00 * r00 * vx + r01 * r01 * vy + r02 * r02 * vz;
+  covariances[base + 1] = signedCovariance(
+    r00 * r10 * vx + r01 * r11 * vy + r02 * r12 * vz,
+    flipY,
+  );
+  covariances[base + 2] = r00 * r20 * vx + r01 * r21 * vy + r02 * r22 * vz;
+  covariances[base + 3] = r10 * r10 * vx + r11 * r11 * vy + r12 * r12 * vz;
+  covariances[base + 4] = signedCovariance(
+    r10 * r20 * vx + r11 * r21 * vy + r12 * r22 * vz,
+    flipY,
+  );
+  covariances[base + 5] = r20 * r20 * vx + r21 * r21 * vy + r22 * r22 * vz;
+}
+
+function signedCovariance(value: number, flipY: boolean): number {
+  return flipY ? -value : value;
+}
+
+function clampSplatScale(value: number): number {
+  return Math.max(0.0002, Math.min(0.08, value || 0.004));
 }
 
 function hasColorFields(
@@ -409,6 +505,10 @@ function normalizeColor(value: number): number {
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function sigmoid(value: number): number {
+  return 1 / (1 + Math.exp(-value));
 }
 
 function findBytes(haystack: Uint8Array, needle: Uint8Array): number {

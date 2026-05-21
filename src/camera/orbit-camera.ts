@@ -94,6 +94,10 @@ export class OrbitCamera {
     return this.scene;
   }
 
+  public getViewMatrix(): Float32Array {
+    return this.viewMatrix;
+  }
+
   public update(): void {
     this.camera.update();
     this.camera.getViewMatrix(true).copyToArray(this.viewMatrix, 0);
