@@ -4,6 +4,7 @@ import { GaussianRenderer } from "../renderer/gaussian-renderer";
 import { createDemoSplatSource } from "../splats/demo-splat-source";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { loadSplatSource } from "../splats/splatLoader";
+import { SplatWorld } from "../world/splat-world";
 
 export interface GaussianSplatViewerOptions {
   canvas: HTMLCanvasElement;
@@ -15,6 +16,7 @@ export default class GaussianSplatViewer {
   private readonly renderer: GaussianRenderer;
   private readonly camera: OrbitCamera;
   private readonly splatBuffer: SplatBuffer;
+  private readonly world: SplatWorld;
   private rafId: number | null = null;
   private isRunning = false;
 
@@ -23,11 +25,13 @@ export default class GaussianSplatViewer {
     renderer: GaussianRenderer,
     camera: OrbitCamera,
     splatBuffer: SplatBuffer,
+    world: SplatWorld,
   ) {
     this.gpu = gpu;
     this.renderer = renderer;
     this.camera = camera;
     this.splatBuffer = splatBuffer;
+    this.world = world;
   }
 
   static async create(
@@ -41,13 +45,16 @@ export default class GaussianSplatViewer {
       renderer.getCameraBindGroupLayout(),
     );
     const splatData = await loadSplatSource(options.source ?? createDemoSplatSource());
+    const world = SplatWorld.fromSplatData(splatData);
     const splatBuffer = new SplatBuffer();
 
-    splatBuffer.setData(splatData);
+    splatBuffer.setData(world.getSplatData());
     splatBuffer.createBuffers(gpu.device);
+    splatBuffer.createStableIdBuffers(gpu.device, world.getSplatData());
+    splatBuffer.createChunkMetadataBuffer(gpu.device, world.packGpuMetadata());
     renderer.setSplatBuffer(splatBuffer);
 
-    return new GaussianSplatViewer(gpu, renderer, camera, splatBuffer);
+    return new GaussianSplatViewer(gpu, renderer, camera, splatBuffer, world);
   }
 
   start(): void {
@@ -90,13 +97,22 @@ export default class GaussianSplatViewer {
     return this.camera.getBabylonScene();
   }
 
+  getWorld(): SplatWorld {
+    return this.world;
+  }
+
   private readonly resize = (): void => {
     this.gpu.resize();
   };
 
   private readonly loop = (): void => {
     this.camera.update();
-    this.splatBuffer.sortByView(this.camera.getViewMatrix(), this.gpu.device);
+    const visibility = this.world.updateVisibility(this.camera.getViewProjectionMatrix());
+    this.splatBuffer.sortByView(
+      this.camera.getViewMatrix(),
+      this.gpu.device,
+      visibility.chunks,
+    );
     this.renderer.render(this.camera.uniforms);
     this.rafId = requestAnimationFrame(this.loop);
   };

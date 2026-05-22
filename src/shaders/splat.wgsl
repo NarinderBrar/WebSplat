@@ -19,7 +19,7 @@ struct VertexOutput {
 @group(1) @binding(3) var<storage, read>    splatOpacities:  array<f32>;
 @group(1) @binding(4) var<storage, read>    splatOrder:      array<u32>;
 
-const SPLAT_SCALE = 1.5;
+const SPLAT_SCALE = 1.0;
 
 fn project_covariance_2d(
   worldCenter: vec3<f32>,

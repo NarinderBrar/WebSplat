@@ -9,6 +9,7 @@ export default class RenderPipeline {
   private readonly splatBindGroupLayout: GPUBindGroupLayout;
   private readonly pipeline: GPURenderPipeline;
   private splatBindGroup: GPUBindGroup | null = null;
+  private splatBuffer: SplatBuffer | null = null;
   private splatCount = 0;
 
   constructor(gpu: GpuContext) {
@@ -141,7 +142,8 @@ export default class RenderPipeline {
       ],
     });
 
-    this.splatCount = splatBuffer.getCount();
+    this.splatBuffer = splatBuffer;
+    this.splatCount = splatBuffer.getRenderCount();
   }
 
   getCameraBindGroupLayout(): GPUBindGroupLayout {
@@ -170,6 +172,8 @@ export default class RenderPipeline {
         },
       ],
     });
+
+    this.splatCount = this.splatBuffer?.getRenderCount() ?? 0;
 
     if (cameraBindGroup && this.splatBindGroup && this.splatCount > 0) {
       renderPass.setPipeline(this.pipeline);
