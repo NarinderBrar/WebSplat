@@ -1,4 +1,5 @@
 import { CameraUniforms } from "../camera/camera-uniforms";
+import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 import RenderPipeline from "./render-pipeline";
@@ -18,6 +19,10 @@ export class GaussianRenderer {
 
   public getCameraBindGroupLayout(): GPUBindGroupLayout {
     return this.pipeline.getCameraBindGroupLayout();
+  }
+
+  public setGpuChunkCullPass(pass: GpuChunkCullPass): void {
+    this.pipeline.setGpuChunkCullPass(pass);
   }
 
   public render(cameraUniforms: CameraUniforms): void {

@@ -1,5 +1,6 @@
 import splatShader from "../shaders/splat.wgsl?raw";
 import { CameraUniforms } from "../camera/camera-uniforms";
+import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 
@@ -10,6 +11,7 @@ export default class RenderPipeline {
   private readonly pipeline: GPURenderPipeline;
   private splatBindGroup: GPUBindGroup | null = null;
   private splatBuffer: SplatBuffer | null = null;
+  private gpuChunkCullPass: GpuChunkCullPass | null = null;
   private splatCount = 0;
 
   constructor(gpu: GpuContext) {
@@ -24,7 +26,7 @@ export default class RenderPipeline {
       entries: [
         {
           binding: 0,
-          visibility: GPUShaderStage.VERTEX,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
           buffer: { type: "uniform" },
         },
       ],
@@ -55,6 +57,11 @@ export default class RenderPipeline {
         },
         {
           binding: 4,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 5,
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "read-only-storage" },
         },
@@ -107,11 +114,12 @@ export default class RenderPipeline {
     const colorBuffer = splatBuffer.getColorBuffer();
     const covarianceBuffer = splatBuffer.getCovarianceBuffer();
     const opacityBuffer = splatBuffer.getOpacityBuffer();
-    const orderBuffer = splatBuffer.getOrderBuffer();
+    const visibleSplatIndicesBuffer = splatBuffer.getVisibleSplatIndicesBuffer();
+    const selectionMaskBuffer = splatBuffer.getSelectionMaskBuffer();
 
-    if (!positionBuffer || !colorBuffer || !covarianceBuffer || !opacityBuffer || !orderBuffer) {
+    if (!positionBuffer || !colorBuffer || !covarianceBuffer || !opacityBuffer || !visibleSplatIndicesBuffer || !selectionMaskBuffer) {
       throw new Error(
-        "Splat positions, colors, covariances, opacities and render order must be uploaded before binding.",
+        "Splat positions, colors, covariances, opacities, visible indices and selection mask must be uploaded before binding.",
       );
     }
 
@@ -137,7 +145,11 @@ export default class RenderPipeline {
         },
         {
           binding: 4,
-          resource: { buffer: orderBuffer },
+          resource: { buffer: visibleSplatIndicesBuffer },
+        },
+        {
+          binding: 5,
+          resource: { buffer: selectionMaskBuffer },
         },
       ],
     });
@@ -150,12 +162,17 @@ export default class RenderPipeline {
     return this.cameraBindGroupLayout;
   }
 
+  setGpuChunkCullPass(pass: GpuChunkCullPass): void {
+    this.gpuChunkCullPass = pass;
+  }
+
   renderFrame(
     encoder: GPUCommandEncoder,
     textureView: GPUTextureView,
     cameraUniforms: CameraUniforms,
   ): void {
     const cameraBindGroup = cameraUniforms.getBindGroup();
+    this.gpuChunkCullPass?.encode(encoder, cameraUniforms, window.innerHeight);
 
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [
@@ -179,7 +196,13 @@ export default class RenderPipeline {
       renderPass.setPipeline(this.pipeline);
       renderPass.setBindGroup(0, cameraBindGroup);
       renderPass.setBindGroup(1, this.splatBindGroup);
-      renderPass.draw(this.splatCount * 6);
+      const indirectArgsBuffer = this.splatBuffer?.getIndirectArgsBuffer();
+
+      if (indirectArgsBuffer) {
+        renderPass.drawIndirect(indirectArgsBuffer, 0);
+      } else {
+        renderPass.draw(6, this.splatCount);
+      }
     }
 
     renderPass.end();

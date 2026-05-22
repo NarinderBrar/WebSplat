@@ -3,9 +3,12 @@ import { packChunkGpuMetadata } from "./chunk-gpu-metadata";
 import { Frustum } from "./frustum";
 import {
   DEFAULT_CHUNK_BUILD_OPTIONS,
+  type ChunkRenderPlan,
   type ChunkBuildOptions,
+  type ChunkDebugStats,
   type ChunkLookupResult,
   type ChunkVisibility,
+  type RenderQualityMode,
   type SplatChunk,
   type Vector3Tuple,
   type WorldSplatData,
@@ -34,6 +37,8 @@ export class SplatWorld {
   private readonly cellSize: number;
   private visibleChunks: SplatChunk[] = [];
   private visibleSplatCount = 0;
+  private readonly lastLodCounts = [0, 0, 0, 0];
+  private lastChunkSortMs = 0;
 
   private constructor(
     splatData: WorldSplatData,
@@ -92,6 +97,75 @@ export class SplatWorld {
     return {
       chunks: this.visibleChunks,
       splatCount: this.visibleSplatCount,
+    };
+  }
+
+  public createRenderPlans(
+    viewMatrix: Float32Array,
+    projectionMatrix: Float32Array,
+    viewportHeight: number,
+    qualityMode: RenderQualityMode,
+    previousFrameMs: number,
+  ): readonly ChunkRenderPlan[] {
+    const start = performance.now();
+    const focalLength = projectionMatrix[5] * viewportHeight * 0.5;
+    const adaptivePressure = previousFrameMs > 16.6;
+    const plans: ChunkRenderPlan[] = [];
+    this.lastLodCounts.fill(0);
+
+    for (const chunk of this.visibleChunks) {
+      const depth =
+        viewMatrix[2] * chunk.center[0] +
+        viewMatrix[6] * chunk.center[1] +
+        viewMatrix[10] * chunk.center[2] +
+        viewMatrix[14];
+      const safeDepth = Math.max(0.001, depth);
+      const screenRadius = Math.max(0, (chunk.radius * focalLength) / safeDepth);
+      const lodStep = chooseLodStep(screenRadius, qualityMode, adaptivePressure);
+
+      chunk.depthKey = depth;
+      chunk.screenRadius = screenRadius;
+      chunk.lodStep = lodStep;
+      chunk.lodLevel = Math.log2(lodStep);
+      this.lastLodCounts[lodLevelIndex(lodStep)] += Math.ceil(chunk.splatCount / lodStep);
+      plans.push({
+        chunkId: chunk.id,
+        depthKey: depth,
+        lodStep,
+        splatStart: chunk.splatStart,
+        splatCount: chunk.splatCount,
+        screenRadius,
+        localOrderCacheVersion: chunk.localOrderCacheVersion,
+      });
+    }
+
+    plans.sort((a, b) => b.depthKey - a.depthKey);
+    this.lastChunkSortMs = performance.now() - start;
+    return plans;
+  }
+
+  public getDebugStats(
+    renderOrderSplatCount: number,
+    telemetry: Partial<Omit<ChunkDebugStats, "totalSplats" | "totalChunks" | "visibleChunks" | "visibleSplats" | "culledChunks" | "culledSplats" | "renderOrderSplatCount" | "lod0Splats" | "lod1Splats" | "lod2Splats" | "lod3Splats">> = {},
+  ): ChunkDebugStats {
+    return {
+      totalSplats: this.splatData.count,
+      totalChunks: this.chunks.length,
+      visibleChunks: this.visibleChunks.length,
+      visibleSplats: this.visibleSplatCount,
+      culledChunks: this.chunks.length - this.visibleChunks.length,
+      culledSplats: this.splatData.count - this.visibleSplatCount,
+      renderOrderSplatCount,
+      lod0Splats: this.lastLodCounts[0],
+      lod1Splats: this.lastLodCounts[1],
+      lod2Splats: this.lastLodCounts[2],
+      lod3Splats: this.lastLodCounts[3],
+      estimatedFps: telemetry.estimatedFps ?? 0,
+      frameMs: telemetry.frameMs ?? 0,
+      cpuCullMs: telemetry.cpuCullMs ?? 0,
+      chunkSortMs: telemetry.chunkSortMs ?? this.lastChunkSortMs,
+      localOrderRefreshMs: telemetry.localOrderRefreshMs ?? 0,
+      visibleIndexBuildMs: telemetry.visibleIndexBuildMs ?? 0,
     };
   }
 
@@ -312,6 +386,13 @@ function createChunks(data: WorldSplatData, buckets: readonly BuildBucket[]): Sp
       splatCount: bucket.indices.length,
       gpuOffset: splatStart,
       lodLevel: 0,
+      lodStep: 1,
+      screenRadius: 0,
+      depthKey: 0,
+      lastSortDirection: null,
+      localSortedIndicesOffset: splatStart,
+      localSortedIndicesCount: bucket.indices.length,
+      localOrderCacheVersion: 0,
       isDirty: false,
       editVersion: 0,
       selectionVersion: 0,
@@ -320,6 +401,35 @@ function createChunks(data: WorldSplatData, buckets: readonly BuildBucket[]): Sp
   }
 
   return chunks;
+}
+
+function chooseLodStep(
+  screenRadius: number,
+  qualityMode: RenderQualityMode,
+  adaptivePressure: boolean,
+): number {
+  if (qualityMode === "quality") {
+    return screenRadius < 5 ? 2 : 1;
+  }
+
+  if (qualityMode === "performance") {
+    if (screenRadius < 4) return 8;
+    if (screenRadius < 9) return 4;
+    if (screenRadius < 18) return 2;
+    return adaptivePressure && screenRadius < 32 ? 2 : 1;
+  }
+
+  if (screenRadius < 3) return adaptivePressure ? 8 : 4;
+  if (screenRadius < 8) return adaptivePressure ? 4 : 2;
+  if (screenRadius < 18) return adaptivePressure ? 2 : 1;
+  return 1;
+}
+
+function lodLevelIndex(lodStep: number): number {
+  if (lodStep >= 8) return 3;
+  if (lodStep >= 4) return 2;
+  if (lodStep >= 2) return 1;
+  return 0;
 }
 
 function computeBoundsForRange(

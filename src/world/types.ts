@@ -19,9 +19,28 @@ export interface SplatChunk {
   splatCount: number;
   gpuOffset: number;
   lodLevel: number;
+  lodStep: number;
+  screenRadius: number;
+  depthKey: number;
+  lastSortDirection: Vector3Tuple | null;
+  localSortedIndicesOffset: number;
+  localSortedIndicesCount: number;
+  localOrderCacheVersion: number;
   isDirty: boolean;
   editVersion: number;
   selectionVersion: number;
+}
+
+export type RenderQualityMode = "quality" | "balanced" | "performance";
+
+export interface ChunkRenderPlan {
+  chunkId: number;
+  depthKey: number;
+  lodStep: number;
+  splatStart: number;
+  splatCount: number;
+  screenRadius: number;
+  localOrderCacheVersion: number;
 }
 
 export interface ChunkBuildOptions {
@@ -34,6 +53,26 @@ export interface ChunkBuildOptions {
 export interface ChunkVisibility {
   chunks: readonly SplatChunk[];
   splatCount: number;
+}
+
+export interface ChunkDebugStats {
+  totalSplats: number;
+  totalChunks: number;
+  visibleChunks: number;
+  visibleSplats: number;
+  culledChunks: number;
+  culledSplats: number;
+  renderOrderSplatCount: number;
+  lod0Splats: number;
+  lod1Splats: number;
+  lod2Splats: number;
+  lod3Splats: number;
+  estimatedFps: number;
+  frameMs: number;
+  cpuCullMs: number;
+  chunkSortMs: number;
+  localOrderRefreshMs: number;
+  visibleIndexBuildMs: number;
 }
 
 export interface WorldSplatData extends SplatData {
@@ -53,4 +92,3 @@ export const DEFAULT_CHUNK_BUILD_OPTIONS: ChunkBuildOptions = {
   minCellSize: 1e-4,
   maxRefinementPasses: 6,
 };
-

@@ -54,6 +54,13 @@ Planned GPU-driven path:
 4. Draw commands are written into an indirect buffer.
 5. Render pass uses `drawIndirect` or chunk-batched draws.
 
+Current GPU foundation:
+
+- `GpuChunkCullPass` culls chunks on GPU and writes `visibleChunkFlags`, `visibleChunkIndices`, `visibleSplatIndices`, counters, and indirect draw args.
+- The render shader reads `visibleSplatIndices[instanceIndex]`, so instance order is temporary and stable splat identity remains in the base ID buffers.
+- `IdPickingPass` renders stable `splatId + 1` values into an `r32uint` texture and exposes readback for single-pixel picking.
+- `SelectionMask` is allocated as a per-splat GPU buffer and the render shader can highlight selected splats.
+
 ## Update Flow
 
 Load:
@@ -85,4 +92,3 @@ Edit:
 - Stable IDs never depend on GPU instance index; render order can be compacted, sorted, culled, or LOD-filtered without breaking editor references.
 - Connected color selection should flood through neighboring grid chunks instead of scanning the whole world.
 - Move, paint, erase, layer, and override systems should write chunk-local deltas first, then rebuild bounds and GPU metadata only for dirty chunks.
-

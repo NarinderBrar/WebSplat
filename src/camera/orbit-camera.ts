@@ -98,6 +98,10 @@ export class OrbitCamera {
     return this.viewMatrix;
   }
 
+  public getProjectionMatrix(): Float32Array {
+    return this.projectionMatrix;
+  }
+
   public getViewProjectionMatrix(): Float32Array {
     return this.viewProjectionMatrix;
   }
