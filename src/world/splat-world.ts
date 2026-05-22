@@ -410,20 +410,9 @@ function chooseLodStep(
   qualityMode: RenderQualityMode,
   adaptivePressure: boolean,
 ): number {
-  if (qualityMode === "quality") {
-    return screenRadius < 5 ? 2 : 1;
-  }
-
-  if (qualityMode === "performance") {
-    if (screenRadius < 4) return 8;
-    if (screenRadius < 9) return 4;
-    if (screenRadius < 18) return 2;
-    return adaptivePressure && screenRadius < 32 ? 2 : 1;
-  }
-
-  if (screenRadius < 3) return adaptivePressure ? 8 : 4;
-  if (screenRadius < 8) return adaptivePressure ? 4 : 2;
-  if (screenRadius < 18) return adaptivePressure ? 2 : 1;
+  void screenRadius;
+  void qualityMode;
+  void adaptivePressure;
   return 1;
 }
 

@@ -95,13 +95,13 @@ export default class GaussianSplatViewer {
       chunkCount: world.getChunks().length,
       splatCount: world.getSplatData().count,
     });
-    const renderBackend = getRenderBackend(options.qualityMode ?? "gpu-balanced");
+    const renderBackend = getRenderBackend(options.qualityMode ?? "performance");
     const gpuDepthBinPass = createGpuDepthBinPass(
       gpu.device,
       renderer.getCameraBindGroupLayout(),
       splatBuffer,
       world.getSplatData().count,
-      options.qualityMode ?? "gpu-balanced",
+      options.qualityMode ?? "performance",
       gpu.canvas.height,
       renderBackend,
     );
@@ -129,7 +129,7 @@ export default class GaussianSplatViewer {
       gpuDepthBinPass,
       idPickingPass,
       new DebugStatsOverlay(),
-      options.qualityMode ?? "gpu-balanced",
+      options.qualityMode ?? "performance",
       renderBackend,
     );
   }
@@ -264,9 +264,8 @@ function getRenderScale(qualityMode: RenderQualityMode): number {
 }
 
 function getRenderBackend(qualityMode: RenderQualityMode): GpuRenderBackend {
-  return qualityMode === "performance"
-    ? "gpuDepthBinned"
-    : "cpuChunkBinned";
+  void qualityMode;
+  return "cpuChunkBinned";
 }
 
 function createGpuDepthBinPass(

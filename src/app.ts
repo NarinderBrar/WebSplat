@@ -34,5 +34,5 @@ function parseQualityMode(value: string | null): RenderQualityMode {
     return value;
   }
 
-  return "gpu-balanced";
+  return "performance";
 }
