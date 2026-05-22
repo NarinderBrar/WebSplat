@@ -4,6 +4,7 @@ export class GpuContext {
   public readonly canvas: HTMLCanvasElement;
   public readonly context: GPUCanvasContext;
   public readonly presentationFormat: GPUTextureFormat;
+  private renderScale = 1;
 
   private constructor(
     adapter: GPUAdapter,
@@ -61,8 +62,8 @@ export class GpuContext {
 
   public resize(): boolean {
     const devicePixelRatio = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.floor(this.canvas.clientWidth * devicePixelRatio));
-    const height = Math.max(1, Math.floor(this.canvas.clientHeight * devicePixelRatio));
+    const width = Math.max(1, Math.floor(this.canvas.clientWidth * devicePixelRatio * this.renderScale));
+    const height = Math.max(1, Math.floor(this.canvas.clientHeight * devicePixelRatio * this.renderScale));
 
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
@@ -76,6 +77,17 @@ export class GpuContext {
 
   public resizeIfNeeded(): boolean {
     return this.resize();
+  }
+
+  public setRenderScale(scale: number): void {
+    const nextScale = Math.max(0.4, Math.min(1, scale));
+
+    if (Math.abs(this.renderScale - nextScale) < 0.001) {
+      return;
+    }
+
+    this.renderScale = nextScale;
+    this.resize();
   }
 
   public beginFrame(): GPUCommandEncoder {

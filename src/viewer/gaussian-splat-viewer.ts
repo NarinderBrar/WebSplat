@@ -1,5 +1,6 @@
 import { OrbitCamera } from "../camera/orbit-camera";
 import { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
+import { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import { IdPickingPass } from "../passes/idPickingPass";
 import { GpuContext } from "../renderer/gpu-context";
 import { GaussianRenderer } from "../renderer/gaussian-renderer";
@@ -8,7 +9,7 @@ import { SplatBuffer } from "../splats/splatBuffer";
 import { loadSplatSource } from "../splats/splatLoader";
 import { DebugStatsOverlay } from "./debug-stats-overlay";
 import { SplatWorld } from "../world/splat-world";
-import type { RenderQualityMode } from "../world/types";
+import type { GpuRenderBackend, RenderQualityMode } from "../world/types";
 
 export interface GaussianSplatViewerOptions {
   canvas: HTMLCanvasElement;
@@ -23,12 +24,15 @@ export default class GaussianSplatViewer {
   private readonly splatBuffer: SplatBuffer;
   private readonly world: SplatWorld;
   private readonly gpuChunkCullPass: GpuChunkCullPass;
+  private readonly gpuDepthBinPass: GpuDepthBinPass | null;
   private readonly idPickingPass: IdPickingPass;
   private readonly debugStatsOverlay: DebugStatsOverlay;
   private readonly qualityMode: RenderQualityMode;
+  private readonly renderBackend: GpuRenderBackend;
   private rafId: number | null = null;
   private isRunning = false;
   private lastFrameMs = 16.6;
+  private lastRafTime = performance.now();
 
   private constructor(
     gpu: GpuContext,
@@ -37,9 +41,11 @@ export default class GaussianSplatViewer {
     splatBuffer: SplatBuffer,
     world: SplatWorld,
     gpuChunkCullPass: GpuChunkCullPass,
+    gpuDepthBinPass: GpuDepthBinPass | null,
     idPickingPass: IdPickingPass,
     debugStatsOverlay: DebugStatsOverlay,
     qualityMode: RenderQualityMode,
+    renderBackend: GpuRenderBackend,
   ) {
     this.gpu = gpu;
     this.renderer = renderer;
@@ -47,15 +53,18 @@ export default class GaussianSplatViewer {
     this.splatBuffer = splatBuffer;
     this.world = world;
     this.gpuChunkCullPass = gpuChunkCullPass;
+    this.gpuDepthBinPass = gpuDepthBinPass;
     this.idPickingPass = idPickingPass;
     this.debugStatsOverlay = debugStatsOverlay;
     this.qualityMode = qualityMode;
+    this.renderBackend = renderBackend;
   }
 
   static async create(
     options: GaussianSplatViewerOptions,
   ): Promise<GaussianSplatViewer> {
     const gpu = await GpuContext.create(options.canvas);
+    gpu.setRenderScale(getRenderScale(options.qualityMode ?? "gpu-balanced"));
     const renderer = new GaussianRenderer(gpu);
     const camera = new OrbitCamera(
       gpu.device,
@@ -86,6 +95,26 @@ export default class GaussianSplatViewer {
       chunkCount: world.getChunks().length,
       splatCount: world.getSplatData().count,
     });
+    const renderBackend = getRenderBackend(options.qualityMode ?? "gpu-balanced");
+    const gpuDepthBinPass = createGpuDepthBinPass(
+      gpu.device,
+      renderer.getCameraBindGroupLayout(),
+      splatBuffer,
+      world.getSplatData().count,
+      options.qualityMode ?? "gpu-balanced",
+      gpu.canvas.height,
+      renderBackend,
+    );
+
+    if (gpuDepthBinPass) {
+      const buffers = gpuDepthBinPass.getBuffers();
+      splatBuffer.adoptGpuVisibleBuffers(
+        buffers.visibleSplatIndicesBuffer,
+        buffers.indirectArgsBuffer,
+      );
+      renderer.setGpuDepthBinPass(gpuDepthBinPass);
+    }
+
     renderer.setSplatBuffer(splatBuffer);
     const idPickingPass = new IdPickingPass(gpu.device, renderer.getCameraBindGroupLayout());
     idPickingPass.setSplatBuffer(splatBuffer);
@@ -97,9 +126,11 @@ export default class GaussianSplatViewer {
       splatBuffer,
       world,
       gpuChunkCullPass,
+      gpuDepthBinPass,
       idPickingPass,
       new DebugStatsOverlay(),
-      options.qualityMode ?? "balanced",
+      options.qualityMode ?? "gpu-balanced",
+      renderBackend,
     );
   }
 
@@ -131,6 +162,7 @@ export default class GaussianSplatViewer {
     this.stop();
     this.debugStatsOverlay.dispose();
     this.idPickingPass.dispose();
+    this.gpuDepthBinPass?.dispose();
     this.gpuChunkCullPass.dispose();
     this.splatBuffer.dispose();
     this.camera.dispose();
@@ -176,34 +208,95 @@ export default class GaussianSplatViewer {
 
   private readonly loop = (): void => {
     const frameStart = performance.now();
+    this.lastFrameMs = frameStart - this.lastRafTime;
+    this.lastRafTime = frameStart;
     this.camera.update();
-    const cullStart = performance.now();
-    this.world.updateVisibility(this.camera.getViewProjectionMatrix());
-    const cpuCullMs = performance.now() - cullStart;
-    const plans = this.world.createRenderPlans(
-      this.camera.getViewMatrix(),
-      this.camera.getProjectionMatrix(),
-      this.gpu.canvas.height,
-      this.qualityMode,
-      this.lastFrameMs,
-    );
-    const visibleTelemetry = this.splatBuffer.buildVisibleSplatIndicesFromChunkPlans(
-      plans,
-      this.camera.getViewMatrix(),
-      this.gpu.device,
-    );
+    let cpuCullMs = 0;
+    let localOrderRefreshMs = 0;
+    let visibleIndexBuildMs = 0;
+
+    if (this.renderBackend === "cpuChunkBinned") {
+      const cullStart = performance.now();
+      this.world.updateVisibility(this.camera.getViewProjectionMatrix());
+      cpuCullMs = performance.now() - cullStart;
+      const plans = this.world.createRenderPlans(
+        this.camera.getViewMatrix(),
+        this.camera.getProjectionMatrix(),
+        this.gpu.canvas.height,
+        this.qualityMode,
+        this.lastFrameMs,
+      );
+      const visibleTelemetry = this.splatBuffer.buildVisibleSplatIndicesFromChunkPlans(
+        plans,
+        this.camera.getViewMatrix(),
+        this.gpu.device,
+      );
+      localOrderRefreshMs = visibleTelemetry.localOrderRefreshMs;
+      visibleIndexBuildMs = visibleTelemetry.visibleIndexBuildMs;
+    }
+
     this.renderer.render(this.camera.uniforms);
-    this.lastFrameMs = performance.now() - frameStart;
     this.debugStatsOverlay.update(this.world.getDebugStats(
       this.splatBuffer.getRenderCount(),
       {
+        backend: this.renderBackend,
         frameMs: this.lastFrameMs,
         estimatedFps: 1000 / Math.max(0.001, this.lastFrameMs),
         cpuCullMs,
-        localOrderRefreshMs: visibleTelemetry.localOrderRefreshMs,
-        visibleIndexBuildMs: visibleTelemetry.visibleIndexBuildMs,
+        localOrderRefreshMs,
+        visibleIndexBuildMs,
       },
     ));
     this.rafId = requestAnimationFrame(this.loop);
   };
+}
+
+function getRenderScale(qualityMode: RenderQualityMode): number {
+  if (qualityMode === "performance") {
+    return 0.6;
+  }
+
+  if (qualityMode === "gpu-balanced") {
+    return 0.8;
+  }
+
+  return 1;
+}
+
+function getRenderBackend(qualityMode: RenderQualityMode): GpuRenderBackend {
+  return qualityMode === "performance"
+    ? "gpuDepthBinned"
+    : "cpuChunkBinned";
+}
+
+function createGpuDepthBinPass(
+  device: GPUDevice,
+  cameraBindGroupLayout: GPUBindGroupLayout,
+  splatBuffer: SplatBuffer,
+  splatCount: number,
+  qualityMode: RenderQualityMode,
+  viewportHeight: number,
+  renderBackend: GpuRenderBackend,
+): GpuDepthBinPass | null {
+  if (renderBackend !== "gpuDepthBinned") {
+    return null;
+  }
+
+  const positionBuffer = splatBuffer.getPositionBuffer();
+  const covarianceBuffer = splatBuffer.getCovarianceBuffer();
+  const opacityBuffer = splatBuffer.getOpacityBuffer();
+
+  if (!positionBuffer || !covarianceBuffer || !opacityBuffer) {
+    throw new Error("Position, covariance and opacity buffers must exist before GPU depth binning is created.");
+  }
+
+  return new GpuDepthBinPass(device, {
+    cameraBindGroupLayout,
+    positionBuffer,
+    covarianceBuffer,
+    opacityBuffer,
+    splatCount,
+    qualityMode,
+    viewportHeight,
+  });
 }

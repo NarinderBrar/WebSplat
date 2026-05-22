@@ -30,9 +30,9 @@ async function main(): Promise<void> {
 main();
 
 function parseQualityMode(value: string | null): RenderQualityMode {
-  if (value === "quality" || value === "performance") {
+  if (value === "quality" || value === "balanced" || value === "gpu-balanced" || value === "performance") {
     return value;
   }
 
-  return "balanced";
+  return "gpu-balanced";
 }

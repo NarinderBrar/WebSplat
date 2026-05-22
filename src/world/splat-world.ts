@@ -3,6 +3,7 @@ import { packChunkGpuMetadata } from "./chunk-gpu-metadata";
 import { Frustum } from "./frustum";
 import {
   DEFAULT_CHUNK_BUILD_OPTIONS,
+  type GpuRenderBackend,
   type ChunkRenderPlan,
   type ChunkBuildOptions,
   type ChunkDebugStats,
@@ -146,9 +147,10 @@ export class SplatWorld {
 
   public getDebugStats(
     renderOrderSplatCount: number,
-    telemetry: Partial<Omit<ChunkDebugStats, "totalSplats" | "totalChunks" | "visibleChunks" | "visibleSplats" | "culledChunks" | "culledSplats" | "renderOrderSplatCount" | "lod0Splats" | "lod1Splats" | "lod2Splats" | "lod3Splats">> = {},
+    telemetry: Partial<Omit<ChunkDebugStats, "backend" | "totalSplats" | "totalChunks" | "visibleChunks" | "visibleSplats" | "culledChunks" | "culledSplats" | "renderOrderSplatCount" | "lod0Splats" | "lod1Splats" | "lod2Splats" | "lod3Splats">> & { backend?: GpuRenderBackend } = {},
   ): ChunkDebugStats {
     return {
+      backend: telemetry.backend ?? "cpuChunkBinned",
       totalSplats: this.splatData.count,
       totalChunks: this.chunks.length,
       visibleChunks: this.visibleChunks.length,

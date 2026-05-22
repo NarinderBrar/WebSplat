@@ -7,7 +7,7 @@ struct CameraUniforms {
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) localPos: vec2<f32>,
-  @location(1) splatId: u32,
+  @location(1) @interpolate(flat) splatId: u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -135,4 +135,3 @@ fn fsMain(input: VertexOutput) -> @location(0) u32 {
 
   return input.splatId;
 }
-

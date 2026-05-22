@@ -1,5 +1,6 @@
 import { CameraUniforms } from "../camera/camera-uniforms";
 import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
+import type { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 import RenderPipeline from "./render-pipeline";
@@ -23,6 +24,10 @@ export class GaussianRenderer {
 
   public setGpuChunkCullPass(pass: GpuChunkCullPass): void {
     this.pipeline.setGpuChunkCullPass(pass);
+  }
+
+  public setGpuDepthBinPass(pass: GpuDepthBinPass): void {
+    this.pipeline.setGpuDepthBinPass(pass);
   }
 
   public render(cameraUniforms: CameraUniforms): void {

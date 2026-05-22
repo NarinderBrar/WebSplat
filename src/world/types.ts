@@ -31,7 +31,8 @@ export interface SplatChunk {
   selectionVersion: number;
 }
 
-export type RenderQualityMode = "quality" | "balanced" | "performance";
+export type RenderQualityMode = "quality" | "balanced" | "gpu-balanced" | "performance";
+export type GpuRenderBackend = "cpuChunkBinned" | "gpuDepthBinned" | "gpuRadixSorted";
 
 export interface ChunkRenderPlan {
   chunkId: number;
@@ -56,6 +57,7 @@ export interface ChunkVisibility {
 }
 
 export interface ChunkDebugStats {
+  backend: GpuRenderBackend;
   totalSplats: number;
   totalChunks: number;
   visibleChunks: number;

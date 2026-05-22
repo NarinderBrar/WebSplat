@@ -260,6 +260,25 @@ export class SplatBuffer {
     return this.indirectArgsBuffer;
   }
 
+  public adoptGpuVisibleBuffers(
+    visibleSplatIndicesBuffer: GPUBuffer,
+    indirectArgsBuffer: GPUBuffer,
+  ): void {
+    if (this.ownsVisibleSplatIndicesBuffer) {
+      this.visibleSplatIndicesBuffer?.destroy();
+    }
+
+    if (this.ownsIndirectArgsBuffer) {
+      this.indirectArgsBuffer?.destroy();
+    }
+
+    this.visibleSplatIndicesBuffer = visibleSplatIndicesBuffer;
+    this.indirectArgsBuffer = indirectArgsBuffer;
+    this.ownsVisibleSplatIndicesBuffer = false;
+    this.ownsIndirectArgsBuffer = false;
+    this.renderCount = this.count;
+  }
+
   public sortByView(
     viewMatrix: Float32Array,
     device: GPUDevice,
