@@ -78,6 +78,9 @@ export interface ChunkDebugStats {
   tileCulledSplats: number;
   tileTestedSplats: number;
   tileProtectedSplats: number;
+  gpuTileTestedSplats: number;
+  gpuMaxTileSplats: number;
+  gpuOverloadedTiles: number;
 }
 
 export interface TileBudgetOptions {

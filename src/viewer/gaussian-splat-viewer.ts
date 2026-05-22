@@ -1,6 +1,7 @@
 import { OrbitCamera } from "../camera/orbit-camera";
 import { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
+import { GpuTilePressurePass, type GpuTilePressureTelemetry } from "../passes/gpuTilePressurePass";
 import { IdPickingPass } from "../passes/idPickingPass";
 import { GpuContext } from "../renderer/gpu-context";
 import { GaussianRenderer } from "../renderer/gaussian-renderer";
@@ -26,6 +27,7 @@ export default class GaussianSplatViewer {
   private readonly world: SplatWorld;
   private readonly gpuChunkCullPass: GpuChunkCullPass;
   private readonly gpuDepthBinPass: GpuDepthBinPass | null;
+  private readonly gpuTilePressurePass: GpuTilePressurePass | null;
   private readonly idPickingPass: IdPickingPass;
   private readonly debugStatsOverlay: DebugStatsOverlay;
   private readonly qualityMode: RenderQualityMode;
@@ -34,6 +36,11 @@ export default class GaussianSplatViewer {
   private isRunning = false;
   private lastFrameMs = 16.6;
   private lastRafTime = performance.now();
+  private lastGpuTilePressure: GpuTilePressureTelemetry = {
+    testedSplats: 0,
+    maxTileSplats: 0,
+    overloadedTiles: 0,
+  };
 
   private constructor(
     gpu: GpuContext,
@@ -43,6 +50,7 @@ export default class GaussianSplatViewer {
     world: SplatWorld,
     gpuChunkCullPass: GpuChunkCullPass,
     gpuDepthBinPass: GpuDepthBinPass | null,
+    gpuTilePressurePass: GpuTilePressurePass | null,
     idPickingPass: IdPickingPass,
     debugStatsOverlay: DebugStatsOverlay,
     qualityMode: RenderQualityMode,
@@ -55,6 +63,7 @@ export default class GaussianSplatViewer {
     this.world = world;
     this.gpuChunkCullPass = gpuChunkCullPass;
     this.gpuDepthBinPass = gpuDepthBinPass;
+    this.gpuTilePressurePass = gpuTilePressurePass;
     this.idPickingPass = idPickingPass;
     this.debugStatsOverlay = debugStatsOverlay;
     this.qualityMode = qualityMode;
@@ -116,6 +125,18 @@ export default class GaussianSplatViewer {
       renderer.setGpuDepthBinPass(gpuDepthBinPass);
     }
 
+    const gpuTilePressurePass = createGpuTilePressurePass(
+      gpu.device,
+      renderer.getCameraBindGroupLayout(),
+      splatBuffer,
+      world.getSplatData().count,
+      options.qualityMode ?? "performance",
+    );
+
+    if (gpuTilePressurePass) {
+      renderer.setGpuTilePressurePass(gpuTilePressurePass);
+    }
+
     renderer.setSplatBuffer(splatBuffer);
     const idPickingPass = new IdPickingPass(gpu.device, renderer.getCameraBindGroupLayout());
     idPickingPass.setSplatBuffer(splatBuffer);
@@ -128,6 +149,7 @@ export default class GaussianSplatViewer {
       world,
       gpuChunkCullPass,
       gpuDepthBinPass,
+      gpuTilePressurePass,
       idPickingPass,
       new DebugStatsOverlay(),
       options.qualityMode ?? "performance",
@@ -163,6 +185,7 @@ export default class GaussianSplatViewer {
     this.stop();
     this.debugStatsOverlay.dispose();
     this.idPickingPass.dispose();
+    this.gpuTilePressurePass?.dispose();
     this.gpuDepthBinPass?.dispose();
     this.gpuChunkCullPass.dispose();
     this.splatBuffer.dispose();
@@ -218,6 +241,8 @@ export default class GaussianSplatViewer {
     let tileCulledSplats = 0;
     let tileTestedSplats = 0;
     let tileProtectedSplats = 0;
+    const gpuTilePressure = this.gpuTilePressurePass?.pollTelemetry() ?? this.lastGpuTilePressure;
+    this.lastGpuTilePressure = gpuTilePressure;
 
     if (this.renderBackend === "cpuChunkBinned") {
       const cullStart = performance.now();
@@ -239,6 +264,7 @@ export default class GaussianSplatViewer {
           this.gpu.canvas.width,
           this.gpu.canvas.height,
           this.camera.getViewProjectionMatrix(),
+          gpuTilePressure,
         ),
       );
       localOrderRefreshMs = visibleTelemetry.localOrderRefreshMs;
@@ -261,6 +287,9 @@ export default class GaussianSplatViewer {
         tileCulledSplats,
         tileTestedSplats,
         tileProtectedSplats,
+        gpuTileTestedSplats: gpuTilePressure.testedSplats,
+        gpuMaxTileSplats: gpuTilePressure.maxTileSplats,
+        gpuOverloadedTiles: gpuTilePressure.overloadedTiles,
       },
     ));
     this.rafId = requestAnimationFrame(this.loop);
@@ -289,6 +318,7 @@ function createTileBudgetOptions(
   viewportWidth: number,
   viewportHeight: number,
   viewProjectionMatrix: Float32Array,
+  gpuTilePressure?: GpuTilePressureTelemetry,
 ): TileBudgetOptions {
   if (qualityMode === "quality") {
     return {
@@ -303,16 +333,67 @@ function createTileBudgetOptions(
     };
   }
 
+  const maxSplatsPerTile = chooseCpuTileBudget(qualityMode, gpuTilePressure);
+
   return {
     enabled: qualityMode === "performance" || qualityMode === "gpu-balanced",
     tileSize: 64,
-    maxSplatsPerTile: qualityMode === "performance" ? 6_000 : 12_000,
+    maxSplatsPerTile,
     maxProtectedScreenRadius: qualityMode === "performance" ? 32 : 24,
     protectedNearDepth: qualityMode === "performance" ? 25 : 40,
     viewportWidth,
     viewportHeight,
     viewProjectionMatrix,
   };
+}
+
+function chooseCpuTileBudget(
+  qualityMode: RenderQualityMode,
+  gpuTilePressure?: GpuTilePressureTelemetry,
+): number {
+  const baseBudget = qualityMode === "performance" ? 6_000 : 12_000;
+
+  if (qualityMode !== "performance" || !gpuTilePressure) {
+    return baseBudget;
+  }
+
+  if (gpuTilePressure.maxTileSplats > 24_000) {
+    return 3_500;
+  }
+
+  if (gpuTilePressure.maxTileSplats > 12_000) {
+    return 4_500;
+  }
+
+  return baseBudget;
+}
+
+function createGpuTilePressurePass(
+  device: GPUDevice,
+  cameraBindGroupLayout: GPUBindGroupLayout,
+  splatBuffer: SplatBuffer,
+  splatCount: number,
+  qualityMode: RenderQualityMode,
+): GpuTilePressurePass | null {
+  if (qualityMode === "quality") {
+    return null;
+  }
+
+  const positionBuffer = splatBuffer.getPositionBuffer();
+  const visibleSplatIndicesBuffer = splatBuffer.getVisibleSplatIndicesBuffer();
+
+  if (!positionBuffer || !visibleSplatIndicesBuffer) {
+    return null;
+  }
+
+  return new GpuTilePressurePass(device, {
+    cameraBindGroupLayout,
+    positionBuffer,
+    visibleSplatIndicesBuffer,
+    maxVisibleSplatCount: splatCount,
+    tileSize: 64,
+    overloadThreshold: qualityMode === "performance" ? 6_000 : 12_000,
+  });
 }
 
 function createGpuDepthBinPass(

@@ -1,6 +1,7 @@
 import { CameraUniforms } from "../camera/camera-uniforms";
 import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import type { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
+import type { GpuTilePressurePass } from "../passes/gpuTilePressurePass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 import RenderPipeline from "./render-pipeline";
@@ -30,13 +31,23 @@ export class GaussianRenderer {
     this.pipeline.setGpuDepthBinPass(pass);
   }
 
+  public setGpuTilePressurePass(pass: GpuTilePressurePass): void {
+    this.pipeline.setGpuTilePressurePass(pass);
+  }
+
   public render(cameraUniforms: CameraUniforms): void {
     this.gpu.resizeIfNeeded();
 
     const encoder = this.gpu.beginFrame();
     const textureView = this.gpu.getCurrentTextureView();
 
-    this.pipeline.renderFrame(encoder, textureView, cameraUniforms);
+    this.pipeline.renderFrame(
+      encoder,
+      textureView,
+      cameraUniforms,
+      this.gpu.canvas.width,
+      this.gpu.canvas.height,
+    );
     this.gpu.submit(encoder);
   }
 

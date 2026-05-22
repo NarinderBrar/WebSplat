@@ -171,6 +171,9 @@ export class SplatWorld {
       tileCulledSplats: telemetry.tileCulledSplats ?? 0,
       tileTestedSplats: telemetry.tileTestedSplats ?? 0,
       tileProtectedSplats: telemetry.tileProtectedSplats ?? 0,
+      gpuTileTestedSplats: telemetry.gpuTileTestedSplats ?? 0,
+      gpuMaxTileSplats: telemetry.gpuMaxTileSplats ?? 0,
+      gpuOverloadedTiles: telemetry.gpuOverloadedTiles ?? 0,
     };
   }
 

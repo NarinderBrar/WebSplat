@@ -2,6 +2,7 @@ import splatShader from "../shaders/splat.wgsl?raw";
 import { CameraUniforms } from "../camera/camera-uniforms";
 import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import type { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
+import type { GpuTilePressurePass } from "../passes/gpuTilePressurePass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 
@@ -14,6 +15,7 @@ export default class RenderPipeline {
   private splatBuffer: SplatBuffer | null = null;
   private gpuChunkCullPass: GpuChunkCullPass | null = null;
   private gpuDepthBinPass: GpuDepthBinPass | null = null;
+  private gpuTilePressurePass: GpuTilePressurePass | null = null;
   private splatCount = 0;
 
   constructor(gpu: GpuContext) {
@@ -172,15 +174,23 @@ export default class RenderPipeline {
     this.gpuDepthBinPass = pass;
   }
 
+  setGpuTilePressurePass(pass: GpuTilePressurePass): void {
+    this.gpuTilePressurePass = pass;
+  }
+
   renderFrame(
     encoder: GPUCommandEncoder,
     textureView: GPUTextureView,
     cameraUniforms: CameraUniforms,
+    viewportWidth: number,
+    viewportHeight: number,
   ): void {
     const cameraBindGroup = cameraUniforms.getBindGroup();
-    this.gpuChunkCullPass?.encode(encoder, cameraUniforms, window.innerHeight);
-    this.gpuDepthBinPass?.setViewportHeight(window.innerHeight);
+    this.gpuChunkCullPass?.encode(encoder, cameraUniforms, viewportHeight);
+    this.gpuDepthBinPass?.setViewportHeight(viewportHeight);
     this.gpuDepthBinPass?.encode(encoder, cameraUniforms);
+    this.gpuTilePressurePass?.resize(viewportWidth, viewportHeight);
+    this.gpuTilePressurePass?.encode(encoder, cameraUniforms, this.splatBuffer?.getRenderCount() ?? 0);
 
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [
