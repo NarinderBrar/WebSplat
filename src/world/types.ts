@@ -75,6 +75,20 @@ export interface ChunkDebugStats {
   chunkSortMs: number;
   localOrderRefreshMs: number;
   visibleIndexBuildMs: number;
+  tileCulledSplats: number;
+  tileTestedSplats: number;
+  tileProtectedSplats: number;
+}
+
+export interface TileBudgetOptions {
+  enabled: boolean;
+  tileSize: number;
+  maxSplatsPerTile: number;
+  maxProtectedScreenRadius: number;
+  protectedNearDepth: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  viewProjectionMatrix: Float32Array;
 }
 
 export interface WorldSplatData extends SplatData {

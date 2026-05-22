@@ -1,4 +1,4 @@
-import type { ChunkRenderPlan, SplatChunk, Vector3Tuple } from "../world/types";
+import type { ChunkRenderPlan, SplatChunk, TileBudgetOptions, Vector3Tuple } from "../world/types";
 
 export interface SplatData {
   positions: Float32Array;
@@ -33,6 +33,9 @@ export interface VisibleIndexBuildTelemetry {
   localOrderRefreshMs: number;
   visibleIndexBuildMs: number;
   refreshedChunkCount: number;
+  tileCulledSplats: number;
+  tileTestedSplats: number;
+  tileProtectedSplats: number;
 }
 
 const LOCAL_SORT_DIRECTION_EPSILON = 0.015;
@@ -362,16 +365,26 @@ export class SplatBuffer {
     plans: readonly ChunkRenderPlan[],
     viewMatrix: Float32Array,
     device: GPUDevice,
+    tileBudget?: TileBudgetOptions,
   ): VisibleIndexBuildTelemetry {
     const start = performance.now();
     let refreshMs = 0;
     let refreshedChunkCount = 0;
+    let tileCulledSplats = 0;
+    let tileTestedSplats = 0;
+    let tileProtectedSplats = 0;
+    const tileState = tileBudget?.enabled
+      ? createTileBudgetState(tileBudget)
+      : null;
 
     if (!this.positions || !this.depths || !this.visibleSplatIndices || !this.chunkLocalSortedIndices) {
       return {
         localOrderRefreshMs: 0,
         visibleIndexBuildMs: 0,
         refreshedChunkCount: 0,
+        tileCulledSplats: 0,
+        tileTestedSplats: 0,
+        tileProtectedSplats: 0,
       };
     }
 
@@ -400,7 +413,24 @@ export class SplatBuffer {
       const sourceEnd = sourceStart + chunk.localSortedIndicesCount;
 
       for (let i = sourceStart; i < sourceEnd; i += plan.lodStep) {
-        this.visibleSplatIndices[writeIndex] = this.chunkLocalSortedIndices[i];
+        const splatIndex = this.chunkLocalSortedIndices[i];
+
+        const useTileBudget = tileState && shouldApplyTileBudget(plan, tileState.options);
+
+        if (tileState && !useTileBudget) {
+          tileProtectedSplats++;
+        }
+
+        if (useTileBudget) {
+          tileTestedSplats++;
+
+          if (!this.acceptTileBudget(splatIndex, tileState)) {
+            tileCulledSplats++;
+            continue;
+          }
+        }
+
+        this.visibleSplatIndices[writeIndex] = splatIndex;
         writeIndex++;
       }
     }
@@ -413,6 +443,9 @@ export class SplatBuffer {
       localOrderRefreshMs: refreshMs,
       visibleIndexBuildMs: performance.now() - start,
       refreshedChunkCount,
+      tileCulledSplats,
+      tileTestedSplats,
+      tileProtectedSplats,
     };
   }
 
@@ -553,4 +586,68 @@ export class SplatBuffer {
       new Uint32Array([6, this.renderCount, 0, 0]),
     );
   }
+
+  private acceptTileBudget(splatIndex: number, state: TileBudgetState): boolean {
+    if (!this.positions) {
+      return true;
+    }
+
+    const base = splatIndex * 3;
+    const x = this.positions[base];
+    const y = this.positions[base + 1];
+    const z = this.positions[base + 2];
+    const m = state.options.viewProjectionMatrix;
+    const clipX = m[0] * x + m[4] * y + m[8] * z + m[12];
+    const clipY = m[1] * x + m[5] * y + m[9] * z + m[13];
+    const clipW = m[3] * x + m[7] * y + m[11] * z + m[15];
+
+    if (clipW <= 0.001) {
+      return false;
+    }
+
+    const ndcX = clipX / clipW;
+    const ndcY = clipY / clipW;
+
+    if (ndcX < -1 || ndcX > 1 || ndcY < -1 || ndcY > 1) {
+      return false;
+    }
+
+    const pixelX = (ndcX * 0.5 + 0.5) * state.options.viewportWidth;
+    const pixelY = (0.5 - ndcY * 0.5) * state.options.viewportHeight;
+    const tileX = Math.max(0, Math.min(state.tilesX - 1, Math.floor(pixelX / state.options.tileSize)));
+    const tileY = Math.max(0, Math.min(state.tilesY - 1, Math.floor(pixelY / state.options.tileSize)));
+    const tileIndex = tileY * state.tilesX + tileX;
+
+    if (state.counts[tileIndex] >= state.options.maxSplatsPerTile) {
+      return false;
+    }
+
+    state.counts[tileIndex]++;
+    return true;
+  }
+}
+
+interface TileBudgetState {
+  options: TileBudgetOptions;
+  tilesX: number;
+  tilesY: number;
+  counts: Uint32Array;
+}
+
+function createTileBudgetState(options: TileBudgetOptions): TileBudgetState {
+  const tilesX = Math.max(1, Math.ceil(options.viewportWidth / options.tileSize));
+  const tilesY = Math.max(1, Math.ceil(options.viewportHeight / options.tileSize));
+
+  return {
+    options,
+    tilesX,
+    tilesY,
+    counts: new Uint32Array(tilesX * tilesY),
+  };
+}
+
+function shouldApplyTileBudget(plan: ChunkRenderPlan, options: TileBudgetOptions): boolean {
+  const depthDistance = Math.abs(plan.depthKey);
+  return plan.screenRadius <= options.maxProtectedScreenRadius &&
+    depthDistance >= options.protectedNearDepth;
 }

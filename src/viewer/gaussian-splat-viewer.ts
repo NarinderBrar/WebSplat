@@ -10,6 +10,7 @@ import { loadSplatSource } from "../splats/splatLoader";
 import { DebugStatsOverlay } from "./debug-stats-overlay";
 import { SplatWorld } from "../world/splat-world";
 import type { GpuRenderBackend, RenderQualityMode } from "../world/types";
+import type { TileBudgetOptions } from "../world/types";
 
 export interface GaussianSplatViewerOptions {
   canvas: HTMLCanvasElement;
@@ -214,6 +215,9 @@ export default class GaussianSplatViewer {
     let cpuCullMs = 0;
     let localOrderRefreshMs = 0;
     let visibleIndexBuildMs = 0;
+    let tileCulledSplats = 0;
+    let tileTestedSplats = 0;
+    let tileProtectedSplats = 0;
 
     if (this.renderBackend === "cpuChunkBinned") {
       const cullStart = performance.now();
@@ -230,9 +234,18 @@ export default class GaussianSplatViewer {
         plans,
         this.camera.getViewMatrix(),
         this.gpu.device,
+        createTileBudgetOptions(
+          this.qualityMode,
+          this.gpu.canvas.width,
+          this.gpu.canvas.height,
+          this.camera.getViewProjectionMatrix(),
+        ),
       );
       localOrderRefreshMs = visibleTelemetry.localOrderRefreshMs;
       visibleIndexBuildMs = visibleTelemetry.visibleIndexBuildMs;
+      tileCulledSplats = visibleTelemetry.tileCulledSplats;
+      tileTestedSplats = visibleTelemetry.tileTestedSplats;
+      tileProtectedSplats = visibleTelemetry.tileProtectedSplats;
     }
 
     this.renderer.render(this.camera.uniforms);
@@ -245,6 +258,9 @@ export default class GaussianSplatViewer {
         cpuCullMs,
         localOrderRefreshMs,
         visibleIndexBuildMs,
+        tileCulledSplats,
+        tileTestedSplats,
+        tileProtectedSplats,
       },
     ));
     this.rafId = requestAnimationFrame(this.loop);
@@ -266,6 +282,37 @@ function getRenderScale(qualityMode: RenderQualityMode): number {
 function getRenderBackend(qualityMode: RenderQualityMode): GpuRenderBackend {
   void qualityMode;
   return "cpuChunkBinned";
+}
+
+function createTileBudgetOptions(
+  qualityMode: RenderQualityMode,
+  viewportWidth: number,
+  viewportHeight: number,
+  viewProjectionMatrix: Float32Array,
+): TileBudgetOptions {
+  if (qualityMode === "quality") {
+    return {
+      enabled: false,
+      tileSize: 64,
+      maxSplatsPerTile: Number.POSITIVE_INFINITY,
+      maxProtectedScreenRadius: 0,
+      protectedNearDepth: Number.POSITIVE_INFINITY,
+      viewportWidth,
+      viewportHeight,
+      viewProjectionMatrix,
+    };
+  }
+
+  return {
+    enabled: qualityMode === "performance" || qualityMode === "gpu-balanced",
+    tileSize: 64,
+    maxSplatsPerTile: qualityMode === "performance" ? 6_000 : 12_000,
+    maxProtectedScreenRadius: qualityMode === "performance" ? 32 : 24,
+    protectedNearDepth: qualityMode === "performance" ? 25 : 40,
+    viewportWidth,
+    viewportHeight,
+    viewProjectionMatrix,
+  };
 }
 
 function createGpuDepthBinPass(

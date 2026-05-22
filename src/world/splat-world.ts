@@ -120,7 +120,7 @@ export class SplatWorld {
         viewMatrix[6] * chunk.center[1] +
         viewMatrix[10] * chunk.center[2] +
         viewMatrix[14];
-      const safeDepth = Math.max(0.001, depth);
+      const safeDepth = Math.max(0.001, Math.abs(depth));
       const screenRadius = Math.max(0, (chunk.radius * focalLength) / safeDepth);
       const lodStep = chooseLodStep(screenRadius, qualityMode, adaptivePressure);
 
@@ -168,6 +168,9 @@ export class SplatWorld {
       chunkSortMs: telemetry.chunkSortMs ?? this.lastChunkSortMs,
       localOrderRefreshMs: telemetry.localOrderRefreshMs ?? 0,
       visibleIndexBuildMs: telemetry.visibleIndexBuildMs ?? 0,
+      tileCulledSplats: telemetry.tileCulledSplats ?? 0,
+      tileTestedSplats: telemetry.tileTestedSplats ?? 0,
+      tileProtectedSplats: telemetry.tileProtectedSplats ?? 0,
     };
   }
 

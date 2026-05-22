@@ -22,6 +22,7 @@ export class DebugStatsOverlay {
       `splats ${stats.visibleSplats}/${stats.totalSplats} | ` +
       `chunks ${stats.visibleChunks}/${stats.totalChunks} | ` +
       `render ${renderText} | ` +
+      `tile ${stats.tileCulledSplats}/${stats.tileTestedSplats} skip/test protect ${stats.tileProtectedSplats} | ` +
       `lod ${stats.lod0Splats}/${stats.lod1Splats}/${stats.lod2Splats}/${stats.lod3Splats} | ` +
       `${stats.estimatedFps.toFixed(1)} fps | ` +
       timingText;
