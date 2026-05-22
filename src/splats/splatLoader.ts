@@ -39,7 +39,7 @@ export async function loadSplatSource(
   }
 
   if (buffer.byteLength % STANDARD_SPLAT_STRIDE_BYTES === 0) {
-    return parseStandardSplatBuffer(buffer);
+    return parseSplatBuffer(buffer);
   }
 
   if (buffer.byteLength % INTERNAL_SPLAT_STRIDE_BYTES === 0) {
@@ -97,7 +97,7 @@ function parseInternalSplatBuffer(buffer: ArrayBuffer): SplatData {
   };
 }
 
-function parseStandardSplatBuffer(buffer: ArrayBuffer): SplatData {
+function parseSplatBuffer(buffer: ArrayBuffer): SplatData {
   const view = new DataView(buffer);
   const count = buffer.byteLength / STANDARD_SPLAT_STRIDE_BYTES;
 
@@ -117,7 +117,7 @@ function parseStandardSplatBuffer(buffer: ArrayBuffer): SplatData {
     const sourceZ = view.getFloat32(offset + 8, true);
 
     positions[base3] = sourceX;
-    positions[base3 + 1] = -sourceY;
+    positions[base3 + 1] = sourceY;
     positions[base3 + 2] = sourceZ;
 
     const sx = view.getFloat32(offset + 12, true);
@@ -487,15 +487,15 @@ function signedCovariance(value: number, flipY: boolean): number {
 }
 
 function clampSplatScale(value: number): number {
-  return Math.max(0.0002, Math.min(0.08, value || 0.004));
+  return Math.max(1e-6, value || 1e-6);
 }
 
 function hasColorFields(
   get: (name: string, fallback?: number) => number,
 ): boolean {
   return (
-    get("red", Number.NaN) === get("red", Number.NaN) ||
-    get("r", Number.NaN) === get("r", Number.NaN)
+    Number.isFinite(get("red", Number.NaN)) ||
+    Number.isFinite(get("r", Number.NaN))
   );
 }
 
