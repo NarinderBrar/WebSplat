@@ -1,4 +1,8 @@
+import { GizmoManager } from "@babylonjs/core/Gizmos/gizmoManager";
+import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { OrbitCamera } from "../camera/orbit-camera";
+import type { HsvAdjust, ScreenPoint, ScreenRect, SelectionMode } from "../editor/types";
 import { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import { GpuTilePressurePass, type GpuTilePressureTelemetry } from "../passes/gpuTilePressurePass";
@@ -41,6 +45,10 @@ export default class GaussianSplatViewer {
     maxTileSplats: 0,
     overloadedTiles: 0,
   };
+  private moveGizmoManager: GizmoManager | null = null;
+  private moveTransformNode: TransformNode | null = null;
+  private moveStartPosition: Vector3 | null = null;
+  private moveActive = false;
 
   private constructor(
     gpu: GpuContext,
@@ -184,6 +192,8 @@ export default class GaussianSplatViewer {
 
   dispose(): void {
     this.stop();
+    this.moveGizmoManager?.dispose();
+    this.moveTransformNode?.dispose();
     this.debugStatsOverlay.dispose();
     this.idPickingPass.dispose();
     this.gpuTilePressurePass?.dispose();
@@ -205,6 +215,14 @@ export default class GaussianSplatViewer {
 
   getWorld(): SplatWorld {
     return this.world;
+  }
+
+  setOrbitControlsEnabled(enabled: boolean): void {
+    this.camera.setControlsEnabled(enabled);
+  }
+
+  setSelectionHighlightVisible(visible: boolean): void {
+    this.splatBuffer.setSelectionHighlightVisible(this.gpu.device, visible);
   }
 
   async pickSplatAt(clientX: number, clientY: number): Promise<number | null> {
@@ -255,6 +273,7 @@ export default class GaussianSplatViewer {
     clientY: number,
     screenRadius: number,
     colorThreshold: number,
+    selectionMode: SelectionMode = "normal",
   ): Promise<number> {
     const rect = this.gpu.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
@@ -272,8 +291,105 @@ export default class GaussianSplatViewer {
         viewMatrix: this.camera.getViewMatrix(),
         viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
         colorThreshold,
+        selectionMode,
       },
     );
+  }
+
+  async selectBrushAt(
+    clientX: number,
+    clientY: number,
+    screenRadius: number,
+    colorThreshold: number,
+    selectionMode: SelectionMode,
+  ): Promise<number> {
+    return this.selectSimilarColorInRadiusAt(clientX, clientY, screenRadius, colorThreshold, selectionMode);
+  }
+
+  async selectMarquee(rect: ScreenRect, partial: boolean, selectionMode: SelectionMode): Promise<number> {
+    return this.splatBuffer.selectMarqueeProgressive(
+      this.gpu.device,
+      {
+        rect,
+        partial,
+        viewportWidth: this.gpu.canvas.width,
+        viewportHeight: this.gpu.canvas.height,
+        viewMatrix: this.camera.getViewMatrix(),
+        viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
+        selectionMode,
+        chunks: this.world.getVisibility().chunks,
+      },
+    );
+  }
+
+  async selectLasso(points: readonly ScreenPoint[], selectionMode: SelectionMode): Promise<number> {
+    return this.splatBuffer.selectLassoProgressive(
+      this.gpu.device,
+      {
+        points,
+        viewportWidth: this.gpu.canvas.width,
+        viewportHeight: this.gpu.canvas.height,
+        viewMatrix: this.camera.getViewMatrix(),
+        viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
+        selectionMode,
+        chunks: this.world.getVisibility().chunks,
+      },
+    );
+  }
+
+  beginHsvEdit(): number {
+    return this.splatBuffer.beginHsvEdit();
+  }
+
+  previewHsvEdit(adjust: HsvAdjust): void {
+    this.splatBuffer.previewHsvEdit(this.gpu.device, adjust);
+  }
+
+  commitHsvEdit(): void {
+    this.splatBuffer.commitHsvEdit();
+  }
+
+  beginColorizeEdit(): number {
+    return this.splatBuffer.beginColorizeEdit();
+  }
+
+  previewColorizeEdit(target: [number, number, number]): void {
+    this.splatBuffer.previewColorizeEdit(this.gpu.device, target);
+  }
+
+  commitColorizeEdit(): void {
+    this.splatBuffer.commitColorizeEdit();
+  }
+
+  beginMoveSelected(): boolean {
+    const centroid = this.splatBuffer.beginMoveEdit();
+
+    if (!centroid) {
+      return false;
+    }
+
+    this.ensureMoveGizmo();
+    if (!this.moveTransformNode || !this.moveGizmoManager) {
+      return false;
+    }
+
+    this.moveTransformNode.position.set(centroid[0], centroid[1], centroid[2]);
+    this.moveStartPosition = this.moveTransformNode.position.clone();
+    this.moveGizmoManager.attachToNode(this.moveTransformNode);
+    this.moveActive = true;
+    return true;
+  }
+
+  previewMoveSelected(delta: [number, number, number]): void {
+    this.splatBuffer.previewMoveEdit(this.gpu.device, delta);
+  }
+
+  commitMoveSelected(): void {
+    this.splatBuffer.commitMoveEdit();
+    this.splatBuffer.createChunkMetadataBuffer(this.gpu.device, this.world.packGpuMetadata());
+    this.moveActive = false;
+    this.moveStartPosition = null;
+    this.moveGizmoManager?.attachToNode(null);
   }
 
   private readonly resize = (): void => {
@@ -285,6 +401,7 @@ export default class GaussianSplatViewer {
     this.lastFrameMs = frameStart - this.lastRafTime;
     this.lastRafTime = frameStart;
     this.camera.update();
+    this.updateMoveGizmoEdit();
     let cpuCullMs = 0;
     let localOrderRefreshMs = 0;
     let visibleIndexBuildMs = 0;
@@ -344,6 +461,30 @@ export default class GaussianSplatViewer {
     ));
     this.rafId = requestAnimationFrame(this.loop);
   };
+
+  private ensureMoveGizmo(): void {
+    if (!this.moveTransformNode) {
+      this.moveTransformNode = new TransformNode("selectedSplatsTransform", this.camera.getBabylonScene());
+    }
+
+    if (!this.moveGizmoManager) {
+      this.moveGizmoManager = new GizmoManager(this.camera.getBabylonScene());
+      this.moveGizmoManager.positionGizmoEnabled = true;
+      this.moveGizmoManager.rotationGizmoEnabled = false;
+      this.moveGizmoManager.scaleGizmoEnabled = false;
+      this.moveGizmoManager.boundingBoxGizmoEnabled = false;
+      this.moveGizmoManager.usePointerToAttachGizmos = false;
+    }
+  }
+
+  private updateMoveGizmoEdit(): void {
+    if (!this.moveActive || !this.moveTransformNode || !this.moveStartPosition) {
+      return;
+    }
+
+    const delta = this.moveTransformNode.position.subtract(this.moveStartPosition);
+    this.splatBuffer.previewMoveEdit(this.gpu.device, [delta.x, delta.y, delta.z]);
+  }
 }
 
 function getRenderScale(qualityMode: RenderQualityMode): number {

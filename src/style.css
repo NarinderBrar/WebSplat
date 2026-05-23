@@ -17,8 +17,15 @@ body {
   cursor: grab;
 }
 
-#renderCanvas[data-tool-mode="select"] {
+#renderCanvas[data-tool-mode="brushSelect"],
+#renderCanvas[data-tool-mode="marqueeSelect"],
+#renderCanvas[data-tool-mode="lassoSelect"] {
   cursor: crosshair;
+}
+
+#renderCanvas[data-tool-mode="hsv"],
+#renderCanvas[data-tool-mode="colorize"] {
+  cursor: default;
 }
 
 .webgpu-warning {
@@ -61,6 +68,10 @@ body {
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
 }
 
+.editor-toolbar {
+  align-items: stretch;
+}
+
 .tool-mode-button {
   width: 34px;
   height: 34px;
@@ -94,11 +105,16 @@ body {
   stroke-linejoin: round;
 }
 
+.tool-settings,
 .selection-controls {
   display: flex;
   align-items: center;
   gap: 8px;
   padding-left: 4px;
+}
+
+.tool-settings[hidden] {
+  display: none;
 }
 
 .selection-control {
@@ -119,6 +135,48 @@ body {
   font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.selection-control .tool-range {
+  width: 92px;
+}
+
+.selection-control input[type="color"] {
+  width: 42px;
+  padding: 2px;
+}
+
+.selection-mode-control {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.06);
+}
+
+.selection-mode-control button {
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  color: rgb(213 224 235);
+  background: transparent;
+  font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  cursor: pointer;
+}
+
+.selection-mode-control button.is-active {
+  color: rgb(255 255 255);
+  background: rgb(64 140 220 / 0.42);
+}
+
+.move-tool-status {
+  display: grid;
+  place-items: center;
+  min-width: 48px;
+  color: rgb(213 224 235);
+  font: 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 .selection-radius-visualizer {
   position: fixed;
   left: 0;
@@ -133,4 +191,31 @@ body {
 .selection-radius-visualizer.is-hidden,
 .selection-radius-visualizer[hidden] {
   display: none;
+}
+
+.marquee-selection-box {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 11;
+  box-sizing: border-box;
+  border: 1px solid rgb(95 184 255 / 0.95);
+  background: rgb(95 184 255 / 0.1);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42);
+  pointer-events: none;
+}
+
+.lasso-selection-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+
+.lasso-selection-overlay polyline {
+  stroke: rgb(255 224 96 / 0.95);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 1px 0 rgb(0 0 0 / 0.65));
 }

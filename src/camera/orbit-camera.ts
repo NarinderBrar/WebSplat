@@ -22,6 +22,7 @@ export class OrbitCamera {
   private readonly projectionMatrix = new Float32Array(16);
   private readonly viewProjectionMatrix = new Float32Array(16);
   private readonly babylonProjection = Matrix.Identity();
+  private controlsEnabled = true;
 
   constructor(
     device: GPUDevice,
@@ -92,6 +93,20 @@ export class OrbitCamera {
 
   public getBabylonScene(): Scene {
     return this.scene;
+  }
+
+  public setControlsEnabled(enabled: boolean): void {
+    if (this.controlsEnabled === enabled) {
+      return;
+    }
+
+    this.controlsEnabled = enabled;
+
+    if (enabled) {
+      this.camera.attachControl(this.canvas, true);
+    } else {
+      this.camera.detachControl();
+    }
   }
 
   public getViewMatrix(): Float32Array {

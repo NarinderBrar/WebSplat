@@ -1,4 +1,5 @@
 import type { ChunkRenderPlan, SplatChunk, TileBudgetOptions, Vector3Tuple } from "../world/types";
+import type { HsvAdjust, ScreenPoint, ScreenRect, SelectionMode } from "../editor/types";
 
 export interface ChunkNeighborLookup {
   getNeighborChunks(chunk: SplatChunk, radius?: number): readonly SplatChunk[];
@@ -66,6 +67,28 @@ export interface ScreenColorSelectionOptions {
   viewProjectionMatrix: Float32Array;
   colorThreshold: number;
   depthTolerance?: number;
+  selectionMode?: SelectionMode;
+}
+
+export interface ScreenMarqueeSelectionOptions {
+  rect: ScreenRect;
+  partial: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+  viewMatrix: Float32Array;
+  viewProjectionMatrix: Float32Array;
+  selectionMode: SelectionMode;
+  chunks?: readonly SplatChunk[];
+}
+
+export interface ScreenLassoSelectionOptions {
+  points: readonly ScreenPoint[];
+  viewportWidth: number;
+  viewportHeight: number;
+  viewMatrix: Float32Array;
+  viewProjectionMatrix: Float32Array;
+  selectionMode: SelectionMode;
+  chunks?: readonly SplatChunk[];
 }
 
 const LOCAL_SORT_DIRECTION_EPSILON = 0.015;
@@ -133,11 +156,20 @@ export class SplatBuffer {
   private chunkIdBuffer: GPUBuffer | null = null;
   private localIndexBuffer: GPUBuffer | null = null;
   private chunkMetadataBuffer: GPUBuffer | null = null;
+  private chunkMetadataBufferSize = 0;
   private selectionMaskBuffer: GPUBuffer | null = null;
   private indirectArgsBuffer: GPUBuffer | null = null;
   private ownsVisibleSplatIndicesBuffer = true;
   private ownsIndirectArgsBuffer = true;
   private selectionGeneration = 0;
+  private selectionHighlightVisible = true;
+  private hiddenSelectionMask: Uint32Array | null = null;
+  private hsvEditOriginalColors: Float32Array | null = null;
+  private hsvEditIndices: Uint32Array | null = null;
+  private colorizeEditOriginalColors: Float32Array | null = null;
+  private colorizeEditIndices: Uint32Array | null = null;
+  private moveEditOriginalPositions: Float32Array | null = null;
+  private moveEditIndices: Uint32Array | null = null;
 
   public setData(data: SplatData): void {
     this.positions = data.positions;
@@ -193,12 +225,16 @@ export class SplatBuffer {
   }
 
   public createChunkMetadataBuffer(device: GPUDevice, metadata: ArrayBuffer): void {
-    this.chunkMetadataBuffer?.destroy();
-    this.chunkMetadataBuffer = device.createBuffer({
-      label: "SplatChunkMetadata",
-      size: metadata.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+    if (!this.chunkMetadataBuffer || this.chunkMetadataBufferSize !== metadata.byteLength) {
+      this.chunkMetadataBuffer?.destroy();
+      this.chunkMetadataBuffer = device.createBuffer({
+        label: "SplatChunkMetadata",
+        size: metadata.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.chunkMetadataBufferSize = metadata.byteLength;
+    }
+
     device.queue.writeBuffer(this.chunkMetadataBuffer, 0, metadata);
   }
 
@@ -522,6 +558,7 @@ export class SplatBuffer {
     seedChunk: SplatChunk,
     world: ChunkNeighborLookup,
     options: Partial<ColorClusterSelectionOptions> = {},
+    selectionMode: SelectionMode = "normal",
   ): number {
     if (!this.positions || !this.colors || !this.selectionMask) {
       return 0;
@@ -534,13 +571,14 @@ export class SplatBuffer {
       maxSelectedSplats: options.maxSelectedSplats ?? 250_000,
     };
 
-    this.selectionMask.fill(0);
+    this.prepareSelectionMode(selectionMode);
 
     const selectedCount = this.addConnectedSimilarColorCluster(
       seedGlobalIndex,
       seedChunk,
       world,
       selectionOptions,
+      selectionMode,
     );
 
     this.uploadSelectionMask(device);
@@ -556,13 +594,13 @@ export class SplatBuffer {
       return 0;
     }
 
-    this.selectionMask.fill(0);
+    this.prepareSelectionMode(options.selectionMode ?? "normal");
 
     const seedIndices = this.collectScreenRadiusSeeds(options);
     let selectedCount = 0;
 
     for (const seedIndex of seedIndices) {
-      if (this.selectionMask[seedIndex] !== 0) {
+      if ((options.selectionMode ?? "normal") !== "subtractive" && this.selectionMask[seedIndex] !== 0) {
         continue;
       }
 
@@ -582,6 +620,7 @@ export class SplatBuffer {
           maxCandidateChunks: 27,
           maxSelectedSplats: 250_000,
         },
+        options.selectionMode ?? "normal",
       );
     }
 
@@ -599,9 +638,13 @@ export class SplatBuffer {
     }
 
     const generation = ++this.selectionGeneration;
-    this.selectionMask.fill(0);
-    this.uploadSelectionMask(device);
-    await nextAnimationFrame();
+    const selectionMode = options.selectionMode ?? "normal";
+    this.prepareSelectionMode(selectionMode);
+
+    if (selectionMode === "normal") {
+      this.uploadSelectionMask(device);
+      await nextAnimationFrame();
+    }
 
     if (generation !== this.selectionGeneration) {
       return 0;
@@ -615,7 +658,7 @@ export class SplatBuffer {
         return selectedCount;
       }
 
-      if (this.selectionMask[seedIndex] !== 0) {
+      if (selectionMode !== "subtractive" && this.selectionMask[seedIndex] !== 0) {
         continue;
       }
 
@@ -637,11 +680,244 @@ export class SplatBuffer {
           maxCandidateChunks: 27,
           maxSelectedSplats: 250_000,
         },
+        selectionMode,
       );
     }
 
     this.uploadSelectionMask(device);
     return selectedCount;
+  }
+
+  public async selectMarqueeProgressive(
+    device: GPUDevice,
+    options: ScreenMarqueeSelectionOptions,
+  ): Promise<number> {
+    return this.selectProjectedGeometryProgressive(device, {
+      ...options,
+      contains: (projected) => {
+        if (options.partial) {
+          const radius = Math.max(1, projected.radius);
+          return projected.x + radius >= options.rect.minX &&
+            projected.x - radius <= options.rect.maxX &&
+            projected.y + radius >= options.rect.minY &&
+            projected.y - radius <= options.rect.maxY;
+        }
+
+        return projected.x >= options.rect.minX &&
+          projected.x <= options.rect.maxX &&
+          projected.y >= options.rect.minY &&
+          projected.y <= options.rect.maxY;
+      },
+    });
+  }
+
+  public async selectLassoProgressive(
+    device: GPUDevice,
+    options: ScreenLassoSelectionOptions,
+  ): Promise<number> {
+    if (options.points.length < 3) {
+      return 0;
+    }
+
+    return this.selectProjectedGeometryProgressive(device, {
+      ...options,
+      contains: (projected) => pointInPolygon(projected.x, projected.y, options.points),
+    });
+  }
+
+  public getSelectedCount(): number {
+    if (!this.selectionMask) {
+      return 0;
+    }
+
+    let count = 0;
+    for (let i = 0; i < this.selectionMask.length; i++) {
+      if (this.selectionMask[i] !== 0) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  public getSelectedCentroid(): Vector3Tuple | null {
+    if (!this.positions || !this.selectionMask) {
+      return null;
+    }
+
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    let count = 0;
+
+    for (let i = 0; i < this.count; i++) {
+      if (this.selectionMask[i] === 0) {
+        continue;
+      }
+
+      const base = i * 3;
+      x += this.positions[base];
+      y += this.positions[base + 1];
+      z += this.positions[base + 2];
+      count++;
+    }
+
+    return count === 0 ? null : [x / count, y / count, z / count];
+  }
+
+  public beginHsvEdit(): number {
+    if (!this.colors || !this.selectionMask) {
+      this.hsvEditOriginalColors = null;
+      this.hsvEditIndices = null;
+      return 0;
+    }
+
+    const indices = this.collectSelectedIndices();
+    this.hsvEditIndices = indices;
+    this.hsvEditOriginalColors = new Float32Array(indices.length * 3);
+
+    for (let i = 0; i < indices.length; i++) {
+      const sourceBase = indices[i] * 3;
+      const editBase = i * 3;
+      this.hsvEditOriginalColors[editBase] = this.colors[sourceBase];
+      this.hsvEditOriginalColors[editBase + 1] = this.colors[sourceBase + 1];
+      this.hsvEditOriginalColors[editBase + 2] = this.colors[sourceBase + 2];
+    }
+
+    return indices.length;
+  }
+
+  public previewHsvEdit(device: GPUDevice, adjust: HsvAdjust): void {
+    if (!this.colors || !this.hsvEditIndices || !this.hsvEditOriginalColors) {
+      return;
+    }
+
+    for (let i = 0; i < this.hsvEditIndices.length; i++) {
+      const editBase = i * 3;
+      const [h, s, v] = rgbToHsv(
+        this.hsvEditOriginalColors[editBase],
+        this.hsvEditOriginalColors[editBase + 1],
+        this.hsvEditOriginalColors[editBase + 2],
+      );
+      const [r, g, b] = hsvToRgb(
+        wrap01(h + adjust.hue),
+        clamp01(s * adjust.saturation),
+        clamp01(v * adjust.value),
+      );
+      const targetBase = this.hsvEditIndices[i] * 3;
+      this.colors[targetBase] = r;
+      this.colors[targetBase + 1] = g;
+      this.colors[targetBase + 2] = b;
+    }
+
+    this.uploadColors(device);
+  }
+
+  public commitHsvEdit(): void {
+    this.hsvEditIndices = null;
+    this.hsvEditOriginalColors = null;
+    this.rebuildSelectionIndices();
+  }
+
+  public beginColorizeEdit(): number {
+    if (!this.colors || !this.selectionMask) {
+      this.colorizeEditOriginalColors = null;
+      this.colorizeEditIndices = null;
+      return 0;
+    }
+
+    const indices = this.collectSelectedIndices();
+    this.colorizeEditIndices = indices;
+    this.colorizeEditOriginalColors = new Float32Array(indices.length * 3);
+
+    for (let i = 0; i < indices.length; i++) {
+      const sourceBase = indices[i] * 3;
+      const editBase = i * 3;
+      this.colorizeEditOriginalColors[editBase] = this.colors[sourceBase];
+      this.colorizeEditOriginalColors[editBase + 1] = this.colors[sourceBase + 1];
+      this.colorizeEditOriginalColors[editBase + 2] = this.colors[sourceBase + 2];
+    }
+
+    return indices.length;
+  }
+
+  public previewColorizeEdit(device: GPUDevice, target: [number, number, number]): void {
+    if (!this.colors || !this.colorizeEditIndices || !this.colorizeEditOriginalColors) {
+      return;
+    }
+
+    const [targetH, targetS] = rgbToHsv(target[0], target[1], target[2]);
+
+    for (let i = 0; i < this.colorizeEditIndices.length; i++) {
+      const editBase = i * 3;
+      const [, , originalValue] = rgbToHsv(
+        this.colorizeEditOriginalColors[editBase],
+        this.colorizeEditOriginalColors[editBase + 1],
+        this.colorizeEditOriginalColors[editBase + 2],
+      );
+      const [r, g, b] = hsvToRgb(targetH, targetS, originalValue);
+      const targetBase = this.colorizeEditIndices[i] * 3;
+      this.colors[targetBase] = r;
+      this.colors[targetBase + 1] = g;
+      this.colors[targetBase + 2] = b;
+    }
+
+    this.uploadColors(device);
+  }
+
+  public commitColorizeEdit(): void {
+    this.colorizeEditIndices = null;
+    this.colorizeEditOriginalColors = null;
+    this.rebuildSelectionIndices();
+  }
+
+  public beginMoveEdit(): Vector3Tuple | null {
+    if (!this.positions || !this.selectionMask) {
+      this.moveEditOriginalPositions = null;
+      this.moveEditIndices = null;
+      return null;
+    }
+
+    const indices = this.collectSelectedIndices();
+    this.moveEditIndices = indices;
+    this.moveEditOriginalPositions = new Float32Array(indices.length * 3);
+
+    for (let i = 0; i < indices.length; i++) {
+      const sourceBase = indices[i] * 3;
+      const editBase = i * 3;
+      this.moveEditOriginalPositions[editBase] = this.positions[sourceBase];
+      this.moveEditOriginalPositions[editBase + 1] = this.positions[sourceBase + 1];
+      this.moveEditOriginalPositions[editBase + 2] = this.positions[sourceBase + 2];
+    }
+
+    return this.getSelectedCentroid();
+  }
+
+  public previewMoveEdit(device: GPUDevice, delta: Vector3Tuple): void {
+    if (!this.positions || !this.moveEditIndices || !this.moveEditOriginalPositions) {
+      return;
+    }
+
+    for (let i = 0; i < this.moveEditIndices.length; i++) {
+      const editBase = i * 3;
+      const targetBase = this.moveEditIndices[i] * 3;
+      this.positions[targetBase] = this.moveEditOriginalPositions[editBase] + delta[0];
+      this.positions[targetBase + 1] = this.moveEditOriginalPositions[editBase + 1] + delta[1];
+      this.positions[targetBase + 2] = this.moveEditOriginalPositions[editBase + 2] + delta[2];
+    }
+
+    this.uploadPositions(device);
+  }
+
+  public commitMoveEdit(): void {
+    this.moveEditIndices = null;
+    this.moveEditOriginalPositions = null;
+    this.rebuildSelectionIndices();
+    for (const chunk of this.chunksById.values()) {
+      this.refreshChunkBounds(chunk);
+      chunk.isDirty = true;
+      chunk.editVersion++;
+      chunk.lastSortDirection = null;
+    }
   }
 
   public clearSelection(device: GPUDevice): void {
@@ -651,6 +927,15 @@ export class SplatBuffer {
 
     this.selectionGeneration++;
     this.selectionMask.fill(0);
+    this.uploadSelectionMask(device);
+  }
+
+  public setSelectionHighlightVisible(device: GPUDevice, visible: boolean): void {
+    if (this.selectionHighlightVisible === visible) {
+      return;
+    }
+
+    this.selectionHighlightVisible = visible;
     this.uploadSelectionMask(device);
   }
 
@@ -683,6 +968,7 @@ export class SplatBuffer {
     this.chunkIdBuffer = null;
     this.localIndexBuffer = null;
     this.chunkMetadataBuffer = null;
+    this.chunkMetadataBufferSize = 0;
     this.selectionMaskBuffer = null;
     this.indirectArgsBuffer = null;
     this.ownsVisibleSplatIndicesBuffer = true;
@@ -695,6 +981,7 @@ export class SplatBuffer {
     this.order = null;
     this.visibleSplatIndices = null;
     this.selectionMask = null;
+    this.hiddenSelectionMask = null;
     this.chunkLocalSortedIndices = null;
     this.splatChunkIds = null;
     this.chunksById.clear();
@@ -781,6 +1068,21 @@ export class SplatBuffer {
       return;
     }
 
+    if (!this.selectionHighlightVisible) {
+      if (!this.hiddenSelectionMask || this.hiddenSelectionMask.length !== this.selectionMask.length) {
+        this.hiddenSelectionMask = new Uint32Array(this.selectionMask.length);
+      }
+
+      device.queue.writeBuffer(
+        this.selectionMaskBuffer,
+        0,
+        this.hiddenSelectionMask.buffer as ArrayBuffer,
+        this.hiddenSelectionMask.byteOffset,
+        this.hiddenSelectionMask.byteLength,
+      );
+      return;
+    }
+
     device.queue.writeBuffer(
       this.selectionMaskBuffer,
       0,
@@ -788,6 +1090,224 @@ export class SplatBuffer {
       this.selectionMask.byteOffset,
       this.selectionMask.byteLength,
     );
+  }
+
+  private uploadColors(device: GPUDevice): void {
+    if (!this.colors || !this.colorBuffer) {
+      return;
+    }
+
+    device.queue.writeBuffer(
+      this.colorBuffer,
+      0,
+      this.colors.buffer as ArrayBuffer,
+      this.colors.byteOffset,
+      this.colors.byteLength,
+    );
+  }
+
+  private uploadPositions(device: GPUDevice): void {
+    if (!this.positions || !this.positionBuffer) {
+      return;
+    }
+
+    device.queue.writeBuffer(
+      this.positionBuffer,
+      0,
+      this.positions.buffer as ArrayBuffer,
+      this.positions.byteOffset,
+      this.positions.byteLength,
+    );
+  }
+
+  private prepareSelectionMode(selectionMode: SelectionMode): void {
+    if (selectionMode === "normal") {
+      this.selectionMask?.fill(0);
+    }
+  }
+
+  private applySelectionCandidate(splatIndex: number, selectionMode: SelectionMode): boolean {
+    if (!this.selectionMask) {
+      return false;
+    }
+
+    if (selectionMode === "subtractive") {
+      const changed = this.selectionMask[splatIndex] !== 0;
+      this.selectionMask[splatIndex] = 0;
+      return changed;
+    }
+
+    const changed = this.selectionMask[splatIndex] === 0;
+    this.selectionMask[splatIndex] = 1;
+    return changed;
+  }
+
+  private collectSelectedIndices(): Uint32Array {
+    if (!this.selectionMask) {
+      return new Uint32Array();
+    }
+
+    const indices: number[] = [];
+
+    for (let i = 0; i < this.selectionMask.length; i++) {
+      if (this.selectionMask[i] !== 0) {
+        indices.push(i);
+      }
+    }
+
+    return Uint32Array.from(indices);
+  }
+
+  private rebuildSelectionIndices(): void {
+    this.selectionIndicesByChunkId.clear();
+
+    for (const chunk of this.chunksById.values()) {
+      const selectionIndex = this.createChunkSelectionIndex(chunk);
+
+      if (selectionIndex) {
+        this.selectionIndicesByChunkId.set(chunk.id, selectionIndex);
+      }
+    }
+  }
+
+  private refreshChunkBounds(chunk: SplatChunk): void {
+    if (!this.positions || chunk.splatCount <= 0) {
+      return;
+    }
+
+    const min: Vector3Tuple = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+    const max: Vector3Tuple = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    const end = chunk.splatStart + chunk.splatCount;
+
+    for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+      const base = splatIndex * 3;
+      const x = this.positions[base];
+      const y = this.positions[base + 1];
+      const z = this.positions[base + 2];
+      min[0] = Math.min(min[0], x);
+      min[1] = Math.min(min[1], y);
+      min[2] = Math.min(min[2], z);
+      max[0] = Math.max(max[0], x);
+      max[1] = Math.max(max[1], y);
+      max[2] = Math.max(max[2], z);
+    }
+
+    chunk.boundsMin = min;
+    chunk.boundsMax = max;
+    chunk.center = [
+      (min[0] + max[0]) * 0.5,
+      (min[1] + max[1]) * 0.5,
+      (min[2] + max[2]) * 0.5,
+    ];
+    const dx = max[0] - chunk.center[0];
+    const dy = max[1] - chunk.center[1];
+    const dz = max[2] - chunk.center[2];
+    chunk.radius = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+
+  private async selectProjectedGeometryProgressive(
+    device: GPUDevice,
+    options: {
+      viewportWidth: number;
+      viewportHeight: number;
+      viewMatrix: Float32Array;
+      viewProjectionMatrix: Float32Array;
+      selectionMode: SelectionMode;
+      chunks?: readonly SplatChunk[];
+      contains(projected: { x: number; y: number; depth: number; radius: number }): boolean;
+    },
+  ): Promise<number> {
+    if (!this.positions || !this.selectionMask) {
+      return 0;
+    }
+
+    const generation = ++this.selectionGeneration;
+    this.prepareSelectionMode(options.selectionMode);
+
+    if (options.selectionMode === "normal") {
+      this.uploadSelectionMask(device);
+      await nextAnimationFrame();
+    }
+
+    const chunks = options.chunks ?? [...this.chunksById.values()];
+    let changedCount = 0;
+    let processedSinceUpload = 0;
+    let sliceStart = performance.now();
+
+    for (const chunk of chunks) {
+      if (generation !== this.selectionGeneration) {
+        return changedCount;
+      }
+
+      const end = chunk.splatStart + chunk.splatCount;
+
+      for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+        const projected = this.projectSplatToScreen(splatIndex, options);
+
+        if (projected && options.contains(projected) && this.applySelectionCandidate(splatIndex, options.selectionMode)) {
+          changedCount++;
+        }
+
+        processedSinceUpload++;
+
+        if (processedSinceUpload >= 8192 || performance.now() - sliceStart > 6) {
+          this.uploadSelectionMask(device);
+          await nextAnimationFrame();
+          processedSinceUpload = 0;
+          sliceStart = performance.now();
+
+          if (generation !== this.selectionGeneration) {
+            return changedCount;
+          }
+        }
+      }
+    }
+
+    this.uploadSelectionMask(device);
+    return changedCount;
+  }
+
+  private projectSplatToScreen(
+    splatIndex: number,
+    options: {
+      viewportWidth: number;
+      viewportHeight: number;
+      viewMatrix: Float32Array;
+      viewProjectionMatrix: Float32Array;
+    },
+  ): { x: number; y: number; depth: number; radius: number } | null {
+    if (!this.positions) {
+      return null;
+    }
+
+    const base = splatIndex * 3;
+    const x = this.positions[base];
+    const y = this.positions[base + 1];
+    const z = this.positions[base + 2];
+    const m = options.viewProjectionMatrix;
+    const clipX = m[0] * x + m[4] * y + m[8] * z + m[12];
+    const clipY = m[1] * x + m[5] * y + m[9] * z + m[13];
+    const clipW = m[3] * x + m[7] * y + m[11] * z + m[15];
+
+    if (clipW <= 0.001) {
+      return null;
+    }
+
+    const ndcX = clipX / clipW;
+    const ndcY = clipY / clipW;
+
+    if (ndcX < -1.2 || ndcX > 1.2 || ndcY < -1.2 || ndcY > 1.2) {
+      return null;
+    }
+
+    const view = options.viewMatrix;
+    const depth = Math.abs(view[2] * x + view[6] * y + view[10] * z + view[14]);
+    return {
+      x: (ndcX * 0.5 + 0.5) * options.viewportWidth,
+      y: (0.5 - ndcY * 0.5) * options.viewportHeight,
+      depth,
+      radius: estimateScreenRadius(this.covariances, splatIndex, clipW, options.viewportHeight),
+    };
   }
 
   private collectScreenRadiusSeeds(options: ScreenColorSelectionOptions): number[] {
@@ -987,6 +1507,7 @@ export class SplatBuffer {
     seedChunk: SplatChunk,
     world: ChunkNeighborLookup,
     options: ColorClusterSelectionOptions,
+    selectionMode: SelectionMode,
   ): number {
     if (!this.positions || !this.colors || !this.selectionMask) {
       return 0;
@@ -1011,6 +1532,7 @@ export class SplatBuffer {
       spatialHash,
       neighborRadiusSq,
       options.maxSelectedSplats,
+      selectionMode,
     );
   }
 
@@ -1021,6 +1543,7 @@ export class SplatBuffer {
     seedChunk: SplatChunk,
     world: ChunkNeighborLookup,
     options: ColorClusterSelectionOptions,
+    selectionMode: SelectionMode,
   ): Promise<number> {
     if (!this.positions || !this.colors || !this.selectionMask || generation !== this.selectionGeneration) {
       return 0;
@@ -1047,6 +1570,7 @@ export class SplatBuffer {
       spatialHash,
       neighborRadiusSq,
       options.maxSelectedSplats,
+      selectionMode,
     );
   }
 
@@ -1237,6 +1761,7 @@ export class SplatBuffer {
     spatialHash: ReadonlyMap<string, readonly number[]>,
     neighborRadiusSq: number,
     maxSelectedSplats: number,
+    selectionMode: SelectionMode,
   ): number {
     if (!this.positions || !this.selectionMask || !candidates.has(seedGlobalIndex)) {
       return 0;
@@ -1253,7 +1778,8 @@ export class SplatBuffer {
       }
 
       visited.add(splatIndex);
-      this.selectionMask[splatIndex] = 1;
+      const changed = this.applySelectionCandidate(splatIndex, selectionMode);
+      void changed;
 
       for (const neighborIndex of this.findSelectionNeighbors(splatIndex, spatialHash, neighborRadiusSq)) {
         if (!visited.has(neighborIndex)) {
@@ -1273,6 +1799,7 @@ export class SplatBuffer {
     spatialHash: ReadonlyMap<string, readonly number[]>,
     neighborRadiusSq: number,
     maxSelectedSplats: number,
+    selectionMode: SelectionMode,
   ): Promise<number> {
     if (!this.positions || !this.selectionMask || !candidates.has(seedGlobalIndex)) {
       return 0;
@@ -1298,8 +1825,7 @@ export class SplatBuffer {
 
       visited.add(splatIndex);
 
-      if (this.selectionMask[splatIndex] === 0) {
-        this.selectionMask[splatIndex] = 1;
+      if (this.applySelectionCandidate(splatIndex, selectionMode)) {
         selectedCount++;
       }
 
@@ -1464,6 +1990,97 @@ function colorBin(value: number): number {
 
 function packedColorBin(r: number, g: number, b: number): number {
   return r | (g << 5) | (b << 10);
+}
+
+function pointInPolygon(x: number, y: number, points: readonly ScreenPoint[]): boolean {
+  let inside = false;
+
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const xi = points[i].x;
+    const yi = points[i].y;
+    const xj = points[j].x;
+    const yj = points[j].y;
+    const intersects = (yi > y) !== (yj > y) &&
+      x < ((xj - xi) * (y - yi)) / Math.max(1e-6, yj - yi) + xi;
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function estimateScreenRadius(
+  covariances: Float32Array | null,
+  splatIndex: number,
+  clipW: number,
+  viewportHeight: number,
+): number {
+  if (!covariances) {
+    return 1;
+  }
+
+  const base = splatIndex * 6;
+  const sx = Math.sqrt(Math.max(0, covariances[base]));
+  const sy = Math.sqrt(Math.max(0, covariances[base + 3]));
+  const sz = Math.sqrt(Math.max(0, covariances[base + 5]));
+  const worldRadius = Math.max(sx, sy, sz, 0.001);
+  return Math.max(1, (worldRadius * viewportHeight) / Math.max(0.001, Math.abs(clipW)));
+}
+
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  let h = 0;
+
+  if (delta > 1e-6) {
+    if (max === r) {
+      h = ((g - b) / delta) % 6;
+    } else if (max === g) {
+      h = (b - r) / delta + 2;
+    } else {
+      h = (r - g) / delta + 4;
+    }
+    h /= 6;
+  }
+
+  return [wrap01(h), max === 0 ? 0 : delta / max, max];
+}
+
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h * 6) % 2) - 1));
+  const m = v - c;
+  const sector = Math.floor(h * 6);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (sector === 0) {
+    r = c; g = x;
+  } else if (sector === 1) {
+    r = x; g = c;
+  } else if (sector === 2) {
+    g = c; b = x;
+  } else if (sector === 3) {
+    g = x; b = c;
+  } else if (sector === 4) {
+    r = x; b = c;
+  } else {
+    r = c; b = x;
+  }
+
+  return [r + m, g + m, b + m];
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function wrap01(value: number): number {
+  return ((value % 1) + 1) % 1;
 }
 
 function nextAnimationFrame(): Promise<void> {
