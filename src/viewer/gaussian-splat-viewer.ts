@@ -76,6 +76,7 @@ export default class GaussianSplatViewer {
     const gpu = await GpuContext.create(options.canvas);
     gpu.setRenderScale(getRenderScale(options.qualityMode ?? "gpu-balanced"));
     const renderer = new GaussianRenderer(gpu);
+    renderer.setQualityLevel(0);
     const camera = new OrbitCamera(
       gpu.device,
       gpu.canvas,

@@ -35,6 +35,10 @@ export class GaussianRenderer {
     this.pipeline.setGpuTilePressurePass(pass);
   }
 
+  public setQualityLevel(quality: number): void {
+    this.pipeline.setQualityLevel(quality);
+  }
+
   public render(cameraUniforms: CameraUniforms): void {
     this.gpu.resizeIfNeeded();
 

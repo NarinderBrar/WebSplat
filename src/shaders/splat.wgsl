@@ -19,8 +19,7 @@ struct VertexOutput {
 @group(1) @binding(3) var<storage, read>    splatOpacities:  array<f32>;
 @group(1) @binding(4) var<storage, read>    visibleSplatIndices: array<u32>;
 @group(1) @binding(5) var<storage, read>    selectionMask: array<u32>;
-
-const SPLAT_SCALE = 1.0;
+@group(1) @binding(6) var<uniform>          renderSettings: vec4<f32>;
 
 fn project_covariance_2d(
   worldCenter: vec3<f32>,
@@ -93,8 +92,9 @@ fn ellipse_offset(cov2d: vec3<f32>, corner: vec2<f32>) -> vec2<f32> {
   let traceHalf = 0.5 * (c00 + c11);
   let delta      = sqrt(max(0.0, traceHalf*traceHalf - (c00*c11 - c01*c01)));
 
-  let lambda0 = clamp(traceHalf + delta, 1e-7, 0.01);
-  let lambda1 = clamp(traceHalf - delta, 1e-7, 0.01);
+  let maxSplatVariance = renderSettings.y;
+  let lambda0 = clamp(traceHalf + delta, 1e-7, maxSplatVariance);
+  let lambda1 = clamp(traceHalf - delta, 1e-7, maxSplatVariance);
 
   var axis0 = vec2<f32>(1.0, 0.0);
   if (abs(c01) > 1e-6 || abs(lambda0 - c00) > 1e-6) {
@@ -158,7 +158,7 @@ fn vsMain(
 
   let cov2d = project_covariance_2d(worldCenter, covariance);
 
-  let ndcOffset = ellipse_offset(cov2d, corner) * SPLAT_SCALE;
+  let ndcOffset = ellipse_offset(cov2d, corner) * renderSettings.x;
 
   var output: VertexOutput;
   output.position = vec4<f32>(

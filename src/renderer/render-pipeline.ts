@@ -11,6 +11,7 @@ export default class RenderPipeline {
   private readonly cameraBindGroupLayout: GPUBindGroupLayout;
   private readonly splatBindGroupLayout: GPUBindGroupLayout;
   private readonly pipeline: GPURenderPipeline;
+  private readonly renderSettingsBuffer: GPUBuffer;
   private splatBindGroup: GPUBindGroup | null = null;
   private splatBuffer: SplatBuffer | null = null;
   private gpuChunkCullPass: GpuChunkCullPass | null = null;
@@ -69,8 +70,20 @@ export default class RenderPipeline {
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "read-only-storage" },
         },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "uniform" },
+        },
       ],
     });
+
+    this.renderSettingsBuffer = gpu.device.createBuffer({
+      label: "SplatRenderSettings",
+      size: 4 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.setQualityLevel(0.6);
 
     this.pipeline = gpu.device.createRenderPipeline({
       label: "SplatParticlePipeline",
@@ -155,6 +168,10 @@ export default class RenderPipeline {
           binding: 5,
           resource: { buffer: selectionMaskBuffer },
         },
+        {
+          binding: 6,
+          resource: { buffer: this.renderSettingsBuffer },
+        },
       ],
     });
 
@@ -176,6 +193,17 @@ export default class RenderPipeline {
 
   setGpuTilePressurePass(pass: GpuTilePressurePass): void {
     this.gpuTilePressurePass = pass;
+  }
+
+  setQualityLevel(quality: number): void {
+    const q = Math.max(0, Math.min(1, quality));
+    const splatScale = 0.85 + q * 0.95;
+    const maxSplatVariance = 0.006 + q * 0.032;
+    this.device.queue.writeBuffer(
+      this.renderSettingsBuffer,
+      0,
+      new Float32Array([splatScale, maxSplatVariance, q, 0]),
+    );
   }
 
   renderFrame(
@@ -228,5 +256,6 @@ export default class RenderPipeline {
 
   dispose(): void {
     // GPURenderPipeline objects are owned by the device and do not need manual disposal.
+    this.renderSettingsBuffer.destroy();
   }
 }

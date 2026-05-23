@@ -80,7 +80,10 @@ function bindSelectionClick(
 
 function createToolModeToolbar(
   canvas: HTMLCanvasElement,
-): { getMode(): InteractionMode; getSelectionOptions(): SelectionToolOptions } {
+): {
+  getMode(): InteractionMode;
+  getSelectionOptions(): SelectionToolOptions;
+} {
   let mode: InteractionMode = "orbit";
   const selectionOptions: SelectionToolOptions = {
     colorThreshold: 0.14,
