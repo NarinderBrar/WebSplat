@@ -83,7 +83,7 @@ export default class RenderPipeline {
       size: 4 * Float32Array.BYTES_PER_ELEMENT,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.setQualityLevel(0.6);
+    this.setQualityLevel(0);
 
     this.pipeline = gpu.device.createRenderPipeline({
       label: "SplatParticlePipeline",
@@ -197,8 +197,8 @@ export default class RenderPipeline {
 
   setQualityLevel(quality: number): void {
     const q = Math.max(0, Math.min(1, quality));
-    const splatScale = 0.85 + q * 0.95;
-    const maxSplatVariance = 0.006 + q * 0.032;
+    const splatScale = 0.72 + q * 0.95;
+    const maxSplatVariance = 0.0035 + q * 0.032;
     this.device.queue.writeBuffer(
       this.renderSettingsBuffer,
       0,

@@ -21,6 +21,9 @@ struct VertexOutput {
 @group(1) @binding(5) var<storage, read>    selectionMask: array<u32>;
 @group(1) @binding(6) var<uniform>          renderSettings: vec4<f32>;
 
+const EXP4 = exp(-4.0);
+const INV_EXP4 = 1.0 / (1.0 - EXP4);
+
 fn project_covariance_2d(
   worldCenter: vec3<f32>,
   cov3d: array<f32, 6>
@@ -93,8 +96,8 @@ fn ellipse_offset(cov2d: vec3<f32>, corner: vec2<f32>) -> vec2<f32> {
   let delta      = sqrt(max(0.0, traceHalf*traceHalf - (c00*c11 - c01*c01)));
 
   let maxSplatVariance = renderSettings.y;
-  let lambda0 = clamp(traceHalf + delta, 1e-7, maxSplatVariance);
-  let lambda1 = clamp(traceHalf - delta, 1e-7, maxSplatVariance);
+  let lambda0 = clamp(traceHalf + delta, 1e-8, maxSplatVariance);
+  let lambda1 = clamp(traceHalf - delta, 1e-8, maxSplatVariance);
 
   var axis0 = vec2<f32>(1.0, 0.0);
   if (abs(c01) > 1e-6 || abs(lambda0 - c00) > 1e-6) {
@@ -189,9 +192,13 @@ fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> {
     discard;
   }
 
-  let gaussian = exp(-4.5 * r2);
+  let gaussian = (exp(-4.0 * r2) - EXP4) * INV_EXP4;
 
   let alpha = gaussian * input.opacity;
+
+  if (alpha < 1.0 / 255.0) {
+    discard;
+  }
 
   return vec4<f32>(input.color * alpha, alpha);
 }

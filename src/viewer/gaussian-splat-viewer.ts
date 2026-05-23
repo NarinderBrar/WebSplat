@@ -347,14 +347,7 @@ export default class GaussianSplatViewer {
 }
 
 function getRenderScale(qualityMode: RenderQualityMode): number {
-  if (qualityMode === "performance") {
-    return 0.6;
-  }
-
-  if (qualityMode === "gpu-balanced") {
-    return 0.8;
-  }
-
+  void qualityMode;
   return 1;
 }
 
