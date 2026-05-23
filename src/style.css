@@ -14,6 +14,11 @@ body {
   display: block;
   touch-action: none;
   outline: none;
+  cursor: grab;
+}
+
+#renderCanvas[data-tool-mode="select"] {
+  cursor: crosshair;
 }
 
 .webgpu-warning {
@@ -39,4 +44,93 @@ body {
   color: rgb(235 244 255);
   font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
   pointer-events: none;
+}
+
+.tool-mode-toolbar {
+  position: fixed;
+  right: 14px;
+  top: 14px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 8px;
+  background: rgb(8 12 16 / 0.74);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+}
+
+.tool-mode-button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: rgb(221 232 244);
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-mode-button:hover {
+  background: rgb(255 255 255 / 0.1);
+}
+
+.tool-mode-button.is-active {
+  border-color: rgb(96 179 255 / 0.75);
+  color: rgb(255 255 255);
+  background: rgb(64 140 220 / 0.28);
+}
+
+.tool-mode-button svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.selection-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 4px;
+}
+
+.selection-control {
+  display: grid;
+  gap: 2px;
+  color: rgb(213 224 235);
+  font: 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.selection-control input {
+  width: 64px;
+  height: 24px;
+  box-sizing: border-box;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 5px;
+  color: rgb(245 250 255);
+  background: rgb(255 255 255 / 0.08);
+  font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.selection-radius-visualizer {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 11;
+  border: 1px solid rgb(255 224 96 / 0.9);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45), inset 0 0 18px rgb(255 224 96 / 0.12);
+  pointer-events: none;
+}
+
+.selection-radius-visualizer.is-hidden,
+.selection-radius-visualizer[hidden] {
+  display: none;
 }

@@ -1,5 +1,9 @@
 import type { ChunkRenderPlan, SplatChunk, TileBudgetOptions, Vector3Tuple } from "../world/types";
 
+export interface ChunkNeighborLookup {
+  getNeighborChunks(chunk: SplatChunk, radius?: number): readonly SplatChunk[];
+}
+
 export interface SplatData {
   positions: Float32Array;
   colors: Float32Array;
@@ -36,6 +40,25 @@ export interface VisibleIndexBuildTelemetry {
   tileCulledSplats: number;
   tileTestedSplats: number;
   tileProtectedSplats: number;
+}
+
+interface ColorClusterSelectionOptions {
+  colorThreshold: number;
+  neighborRadius: number;
+  maxCandidateChunks: number;
+  maxSelectedSplats: number;
+}
+
+export interface ScreenColorSelectionOptions {
+  screenX: number;
+  screenY: number;
+  screenRadius: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  viewMatrix: Float32Array;
+  viewProjectionMatrix: Float32Array;
+  colorThreshold: number;
+  depthTolerance?: number;
 }
 
 const LOCAL_SORT_DIRECTION_EPSILON = 0.015;
@@ -82,7 +105,9 @@ export class SplatBuffer {
   private shCoefficients: Float32Array | null = null;
   private order: Uint32Array | null = null;
   private visibleSplatIndices: Uint32Array | null = null;
+  private selectionMask: Uint32Array | null = null;
   private chunkLocalSortedIndices: Uint32Array | null = null;
+  private splatChunkIds: Uint32Array | null = null;
   private chunksById = new Map<number, SplatChunk>();
   private depths: Float32Array | null = null;
   private count: number = 0;
@@ -114,6 +139,7 @@ export class SplatBuffer {
     this.renderCount = data.count;
     this.order = new Uint32Array(this.count);
     this.visibleSplatIndices = new Uint32Array(this.count);
+    this.selectionMask = new Uint32Array(this.count);
     this.depths = new Float32Array(this.count);
 
     for (let i = 0; i < this.count; i++) {
@@ -168,11 +194,13 @@ export class SplatBuffer {
 
   public createSelectionMaskBuffer(device: GPUDevice): void {
     this.selectionMaskBuffer?.destroy();
+    this.selectionMask = new Uint32Array(this.count);
     this.selectionMaskBuffer = device.createBuffer({
       label: "SelectionMask",
       size: Math.max(4, this.count * Uint32Array.BYTES_PER_ELEMENT),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    this.uploadSelectionMask(device);
   }
 
   public createIndirectArgsBuffer(device: GPUDevice): void {
@@ -189,6 +217,7 @@ export class SplatBuffer {
   public createChunkOrderCache(chunks: readonly SplatChunk[]): void {
     this.chunksById.clear();
     this.chunkLocalSortedIndices = new Uint32Array(this.count);
+    this.splatChunkIds = new Uint32Array(this.count);
 
     for (const chunk of chunks) {
       this.chunksById.set(chunk.id, chunk);
@@ -198,7 +227,9 @@ export class SplatBuffer {
       chunk.lastSortDirection = null;
 
       for (let i = 0; i < chunk.splatCount; i++) {
-        this.chunkLocalSortedIndices[chunk.localSortedIndicesOffset + i] = chunk.splatStart + i;
+        const splatIndex = chunk.splatStart + i;
+        this.chunkLocalSortedIndices[chunk.localSortedIndicesOffset + i] = splatIndex;
+        this.splatChunkIds[splatIndex] = chunk.id;
       }
     }
   }
@@ -468,6 +499,88 @@ export class SplatBuffer {
     this.renderCount = Math.max(0, Math.min(this.count, renderCount));
   }
 
+  public selectConnectedSimilarColor(
+    device: GPUDevice,
+    seedGlobalIndex: number,
+    seedChunk: SplatChunk,
+    world: ChunkNeighborLookup,
+    options: Partial<ColorClusterSelectionOptions> = {},
+  ): number {
+    if (!this.positions || !this.colors || !this.selectionMask) {
+      return 0;
+    }
+
+    const selectionOptions: ColorClusterSelectionOptions = {
+      colorThreshold: options.colorThreshold ?? 0.14,
+      neighborRadius: options.neighborRadius ?? Math.max(0.015, seedChunk.radius * 0.035),
+      maxCandidateChunks: options.maxCandidateChunks ?? 27,
+      maxSelectedSplats: options.maxSelectedSplats ?? 250_000,
+    };
+
+    this.selectionMask.fill(0);
+
+    const selectedCount = this.addConnectedSimilarColorCluster(
+      seedGlobalIndex,
+      seedChunk,
+      world,
+      selectionOptions,
+    );
+
+    this.uploadSelectionMask(device);
+    return selectedCount;
+  }
+
+  public selectConnectedSimilarColorInScreenRadius(
+    device: GPUDevice,
+    world: ChunkNeighborLookup,
+    options: ScreenColorSelectionOptions,
+  ): number {
+    if (!this.positions || !this.colors || !this.visibleSplatIndices || !this.selectionMask) {
+      return 0;
+    }
+
+    this.selectionMask.fill(0);
+
+    const seedIndices = this.collectScreenRadiusSeeds(options);
+    let selectedCount = 0;
+
+    for (const seedIndex of seedIndices) {
+      if (this.selectionMask[seedIndex] !== 0) {
+        continue;
+      }
+
+      const seedChunk = this.getChunkForSplatIndex(seedIndex);
+
+      if (!seedChunk) {
+        continue;
+      }
+
+      selectedCount += this.addConnectedSimilarColorCluster(
+        seedIndex,
+        seedChunk,
+        world,
+        {
+          colorThreshold: options.colorThreshold,
+          neighborRadius: Math.max(0.015, seedChunk.radius * 0.035),
+          maxCandidateChunks: 27,
+          maxSelectedSplats: 250_000,
+        },
+      );
+    }
+
+    this.uploadSelectionMask(device);
+    return selectedCount;
+  }
+
+  public clearSelection(device: GPUDevice): void {
+    if (!this.selectionMask) {
+      return;
+    }
+
+    this.selectionMask.fill(0);
+    this.uploadSelectionMask(device);
+  }
+
   public dispose(): void {
     this.positionBuffer?.destroy();
     this.colorBuffer?.destroy();
@@ -508,7 +621,9 @@ export class SplatBuffer {
     this.shCoefficients = null;
     this.order = null;
     this.visibleSplatIndices = null;
+    this.selectionMask = null;
     this.chunkLocalSortedIndices = null;
+    this.splatChunkIds = null;
     this.chunksById.clear();
     this.depths = null;
     this.count = 0;
@@ -585,6 +700,322 @@ export class SplatBuffer {
       0,
       new Uint32Array([6, this.renderCount, 0, 0]),
     );
+  }
+
+  private uploadSelectionMask(device: GPUDevice): void {
+    if (!this.selectionMask || !this.selectionMaskBuffer) {
+      return;
+    }
+
+    device.queue.writeBuffer(
+      this.selectionMaskBuffer,
+      0,
+      this.selectionMask.buffer as ArrayBuffer,
+      this.selectionMask.byteOffset,
+      this.selectionMask.byteLength,
+    );
+  }
+
+  private collectScreenRadiusSeeds(options: ScreenColorSelectionOptions): number[] {
+    if (!this.positions || !this.visibleSplatIndices) {
+      return [];
+    }
+
+    const radiusSq = options.screenRadius * options.screenRadius;
+    const candidates: Array<{ index: number; distanceSq: number; depth: number }> = [];
+    const m = options.viewProjectionMatrix;
+    const view = options.viewMatrix;
+    let nearestDepth = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < this.renderCount; i++) {
+      const splatIndex = this.visibleSplatIndices[i];
+      const base = splatIndex * 3;
+      const x = this.positions[base];
+      const y = this.positions[base + 1];
+      const z = this.positions[base + 2];
+      const clipX = m[0] * x + m[4] * y + m[8] * z + m[12];
+      const clipY = m[1] * x + m[5] * y + m[9] * z + m[13];
+      const clipW = m[3] * x + m[7] * y + m[11] * z + m[15];
+
+      if (clipW <= 0.001) {
+        continue;
+      }
+
+      const ndcX = clipX / clipW;
+      const ndcY = clipY / clipW;
+
+      if (ndcX < -1 || ndcX > 1 || ndcY < -1 || ndcY > 1) {
+        continue;
+      }
+
+      const pixelX = (ndcX * 0.5 + 0.5) * options.viewportWidth;
+      const pixelY = (0.5 - ndcY * 0.5) * options.viewportHeight;
+      const dx = pixelX - options.screenX;
+      const dy = pixelY - options.screenY;
+      const distanceSq = dx * dx + dy * dy;
+
+      if (distanceSq <= radiusSq) {
+        const depth = Math.abs(
+          view[2] * x +
+          view[6] * y +
+          view[10] * z +
+          view[14],
+        );
+
+        candidates.push({ index: splatIndex, distanceSq, depth });
+        nearestDepth = Math.min(nearestDepth, depth);
+      }
+    }
+
+    if (!Number.isFinite(nearestDepth)) {
+      return [];
+    }
+
+    const depthTolerance = options.depthTolerance ?? Math.max(0.025, nearestDepth * 0.015);
+    const frontLayerDepth = nearestDepth + depthTolerance;
+
+    const frontCandidates = candidates
+      .filter((candidate) => candidate.depth <= frontLayerDepth)
+      .sort((a, b) => a.distanceSq - b.distanceSq);
+
+    return this.pickColorDiverseSeeds(frontCandidates, options.colorThreshold);
+  }
+
+  private pickColorDiverseSeeds(
+    candidates: ReadonlyArray<{ index: number; distanceSq: number }>,
+    colorThreshold: number,
+  ): number[] {
+    if (!this.colors) {
+      return [];
+    }
+
+    const maxSeeds = 2048;
+    const colorBinSize = Math.max(0.025, colorThreshold * 0.75);
+    const seedSet = new Set<number>();
+    const nearestByColor = new Map<string, { index: number; distanceSq: number }>();
+
+    for (const candidate of candidates) {
+      if (seedSet.size < 512) {
+        seedSet.add(candidate.index);
+      }
+
+      const key = this.selectionColorKey(candidate.index, colorBinSize);
+      const previous = nearestByColor.get(key);
+
+      if (!previous || candidate.distanceSq < previous.distanceSq) {
+        nearestByColor.set(key, candidate);
+      }
+    }
+
+    for (const candidate of nearestByColor.values()) {
+      seedSet.add(candidate.index);
+
+      if (seedSet.size >= maxSeeds) {
+        break;
+      }
+    }
+
+    return [...seedSet];
+  }
+
+  private selectionColorKey(splatIndex: number, binSize: number): string {
+    if (!this.colors) {
+      return "0,0,0";
+    }
+
+    const base = splatIndex * 3;
+    return `${Math.floor(this.colors[base] / binSize)},` +
+      `${Math.floor(this.colors[base + 1] / binSize)},` +
+      `${Math.floor(this.colors[base + 2] / binSize)}`;
+  }
+
+  private addConnectedSimilarColorCluster(
+    seedGlobalIndex: number,
+    seedChunk: SplatChunk,
+    world: ChunkNeighborLookup,
+    options: ColorClusterSelectionOptions,
+  ): number {
+    if (!this.positions || !this.colors || !this.selectionMask) {
+      return 0;
+    }
+
+    const seedBase = seedGlobalIndex * 3;
+    const seedR = this.colors[seedBase];
+    const seedG = this.colors[seedBase + 1];
+    const seedB = this.colors[seedBase + 2];
+    const thresholdSq = options.colorThreshold * options.colorThreshold;
+    const neighborRadiusSq = options.neighborRadius * options.neighborRadius;
+    const candidates = this.collectColorCandidates(seedChunk, world, seedR, seedG, seedB, thresholdSq, options);
+
+    if (!candidates.has(seedGlobalIndex)) {
+      candidates.set(seedGlobalIndex, true);
+    }
+
+    const spatialHash = this.buildSelectionSpatialHash(candidates, options.neighborRadius);
+    return this.floodSimilarColorCluster(
+      seedGlobalIndex,
+      candidates,
+      spatialHash,
+      neighborRadiusSq,
+      options.maxSelectedSplats,
+    );
+  }
+
+  private getChunkForSplatIndex(splatIndex: number): SplatChunk | undefined {
+    const chunkId = this.splatChunkIds?.[splatIndex];
+    return chunkId === undefined ? undefined : this.chunksById.get(chunkId);
+  }
+
+  private collectColorCandidates(
+    seedChunk: SplatChunk,
+    world: ChunkNeighborLookup,
+    seedR: number,
+    seedG: number,
+    seedB: number,
+    thresholdSq: number,
+    options: ColorClusterSelectionOptions,
+  ): Map<number, true> {
+    const candidates = new Map<number, true>();
+    const chunks = [
+      seedChunk,
+      ...world.getNeighborChunks(seedChunk, 1),
+    ].slice(0, options.maxCandidateChunks);
+
+    if (!this.colors) {
+      return candidates;
+    }
+
+    for (const chunk of chunks) {
+      const end = chunk.splatStart + chunk.splatCount;
+
+      for (let i = chunk.splatStart; i < end; i++) {
+        const base = i * 3;
+        const dr = this.colors[base] - seedR;
+        const dg = this.colors[base + 1] - seedG;
+        const db = this.colors[base + 2] - seedB;
+
+        if (dr * dr + dg * dg + db * db <= thresholdSq) {
+          candidates.set(i, true);
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  private buildSelectionSpatialHash(candidates: ReadonlyMap<number, true>, cellSize: number): Map<string, number[]> {
+    const hash = new Map<string, number[]>();
+
+    if (!this.positions) {
+      return hash;
+    }
+
+    for (const splatIndex of candidates.keys()) {
+      const key = this.selectionCellKey(splatIndex, cellSize);
+      const bucket = hash.get(key);
+
+      if (bucket) {
+        bucket.push(splatIndex);
+      } else {
+        hash.set(key, [splatIndex]);
+      }
+    }
+
+    return hash;
+  }
+
+  private floodSimilarColorCluster(
+    seedGlobalIndex: number,
+    candidates: ReadonlyMap<number, true>,
+    spatialHash: ReadonlyMap<string, readonly number[]>,
+    neighborRadiusSq: number,
+    maxSelectedSplats: number,
+  ): number {
+    if (!this.positions || !this.selectionMask || !candidates.has(seedGlobalIndex)) {
+      return 0;
+    }
+
+    const queue = [seedGlobalIndex];
+    const visited = new Set<number>();
+
+    while (queue.length > 0 && visited.size < maxSelectedSplats) {
+      const splatIndex = queue.shift();
+
+      if (splatIndex === undefined || visited.has(splatIndex)) {
+        continue;
+      }
+
+      visited.add(splatIndex);
+      this.selectionMask[splatIndex] = 1;
+
+      for (const neighborIndex of this.findSelectionNeighbors(splatIndex, spatialHash, neighborRadiusSq)) {
+        if (!visited.has(neighborIndex)) {
+          queue.push(neighborIndex);
+        }
+      }
+    }
+
+    return visited.size;
+  }
+
+  private findSelectionNeighbors(
+    splatIndex: number,
+    spatialHash: ReadonlyMap<string, readonly number[]>,
+    neighborRadiusSq: number,
+  ): number[] {
+    if (!this.positions) {
+      return [];
+    }
+
+    const base = splatIndex * 3;
+    const x = this.positions[base];
+    const y = this.positions[base + 1];
+    const z = this.positions[base + 2];
+    const cellSize = Math.sqrt(neighborRadiusSq);
+    const cx = Math.floor(x / cellSize);
+    const cy = Math.floor(y / cellSize);
+    const cz = Math.floor(z / cellSize);
+    const neighbors: number[] = [];
+
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bucket = spatialHash.get(`${cx + dx},${cy + dy},${cz + dz}`);
+
+          if (!bucket) {
+            continue;
+          }
+
+          for (const candidateIndex of bucket) {
+            if (candidateIndex === splatIndex) {
+              continue;
+            }
+
+            const candidateBase = candidateIndex * 3;
+            const px = this.positions[candidateBase] - x;
+            const py = this.positions[candidateBase + 1] - y;
+            const pz = this.positions[candidateBase + 2] - z;
+
+            if (px * px + py * py + pz * pz <= neighborRadiusSq) {
+              neighbors.push(candidateIndex);
+            }
+          }
+        }
+      }
+    }
+
+    return neighbors;
+  }
+
+  private selectionCellKey(splatIndex: number, cellSize: number): string {
+    if (!this.positions) {
+      return "0,0,0";
+    }
+
+    const base = splatIndex * 3;
+    return `${Math.floor(this.positions[base] / cellSize)},` +
+      `${Math.floor(this.positions[base + 1] / cellSize)},` +
+      `${Math.floor(this.positions[base + 2] / cellSize)}`;
   }
 
   private acceptTileBudget(splatIndex: number, state: TileBudgetState): boolean {

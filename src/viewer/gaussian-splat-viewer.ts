@@ -226,6 +226,55 @@ export default class GaussianSplatViewer {
     return this.idPickingPass.readCopiedSplatId();
   }
 
+  async selectSimilarColorAt(clientX: number, clientY: number): Promise<number> {
+    const splatId = await this.pickSplatAt(clientX, clientY);
+
+    if (splatId === null) {
+      this.splatBuffer.clearSelection(this.gpu.device);
+      return 0;
+    }
+
+    const picked = this.world.lookupSplat(splatId);
+
+    if (!picked) {
+      this.splatBuffer.clearSelection(this.gpu.device);
+      return 0;
+    }
+
+    return this.splatBuffer.selectConnectedSimilarColor(
+      this.gpu.device,
+      picked.globalIndex,
+      picked.chunk,
+      this.world,
+    );
+  }
+
+  selectSimilarColorInRadiusAt(
+    clientX: number,
+    clientY: number,
+    screenRadius: number,
+    colorThreshold: number,
+  ): number {
+    const rect = this.gpu.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
+    const y = ((clientY - rect.top) / rect.height) * this.gpu.canvas.height;
+
+    return this.splatBuffer.selectConnectedSimilarColorInScreenRadius(
+      this.gpu.device,
+      this.world,
+      {
+        screenX: x,
+        screenY: y,
+        screenRadius: Math.max(1, screenRadius * (this.gpu.canvas.width / Math.max(1, rect.width))),
+        viewportWidth: this.gpu.canvas.width,
+        viewportHeight: this.gpu.canvas.height,
+        viewMatrix: this.camera.getViewMatrix(),
+        viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
+        colorThreshold,
+      },
+    );
+  }
+
   private readonly resize = (): void => {
     this.gpu.resize();
   };

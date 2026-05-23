@@ -11,6 +11,10 @@ export class IdPickingPass {
   private readbackBuffer: GPUBuffer | null = null;
   private width = 1;
   private height = 1;
+  private copiedWidth = 1;
+  private copiedHeight = 1;
+  private copiedCenterX = 0;
+  private copiedCenterY = 0;
 
   constructor(device: GPUDevice, cameraBindGroupLayout: GPUBindGroupLayout) {
     this.device = device;
@@ -90,7 +94,7 @@ export class IdPickingPass {
     });
     this.readbackBuffer = this.device.createBuffer({
       label: "SplatIdPickingReadback",
-      size: 256,
+      size: 256 * 9,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
   }
@@ -129,19 +133,32 @@ export class IdPickingPass {
       return;
     }
 
+    const radius = 4;
+    const centerX = Math.max(0, Math.min(this.width - 1, Math.floor(x)));
+    const centerY = Math.max(0, Math.min(this.height - 1, Math.floor(y)));
+    const originX = Math.max(0, centerX - radius);
+    const originY = Math.max(0, centerY - radius);
+    const endX = Math.min(this.width, centerX + radius + 1);
+    const endY = Math.min(this.height, centerY + radius + 1);
+
+    this.copiedWidth = Math.max(1, endX - originX);
+    this.copiedHeight = Math.max(1, endY - originY);
+    this.copiedCenterX = centerX - originX;
+    this.copiedCenterY = centerY - originY;
+
     encoder.copyTextureToBuffer(
       {
         texture: this.idTexture,
         origin: {
-          x: Math.max(0, Math.min(this.width - 1, Math.floor(x))),
-          y: Math.max(0, Math.min(this.height - 1, Math.floor(y))),
+          x: originX,
+          y: originY,
         },
       },
       {
         buffer: this.readbackBuffer,
         bytesPerRow: 256,
       },
-      [1, 1],
+      [this.copiedWidth, this.copiedHeight],
     );
   }
 
@@ -150,8 +167,30 @@ export class IdPickingPass {
       return null;
     }
 
-    await this.readbackBuffer.mapAsync(GPUMapMode.READ, 0, 4);
-    const encodedId = new Uint32Array(this.readbackBuffer.getMappedRange(0, 4))[0];
+    await this.readbackBuffer.mapAsync(GPUMapMode.READ, 0, 256 * this.copiedHeight);
+    const data = new DataView(this.readbackBuffer.getMappedRange(0, 256 * this.copiedHeight));
+    let encodedId = 0;
+    let bestDistanceSq = Number.POSITIVE_INFINITY;
+
+    for (let row = 0; row < this.copiedHeight; row++) {
+      for (let column = 0; column < this.copiedWidth; column++) {
+        const candidateId = data.getUint32(row * 256 + column * Uint32Array.BYTES_PER_ELEMENT, true);
+
+        if (candidateId === 0) {
+          continue;
+        }
+
+        const dx = column - this.copiedCenterX;
+        const dy = row - this.copiedCenterY;
+        const distanceSq = dx * dx + dy * dy;
+
+        if (distanceSq < bestDistanceSq) {
+          encodedId = candidateId;
+          bestDistanceSq = distanceSq;
+        }
+      }
+    }
+
     this.readbackBuffer.unmap();
     return encodedId === 0 ? null : encodedId - 1;
   }
@@ -164,4 +203,3 @@ export class IdPickingPass {
     this.readbackBuffer = null;
   }
 }
-

@@ -29,6 +29,7 @@ interface ChunkBuild {
 
 export class SplatWorld {
   private readonly chunksById = new Map<number, SplatChunk>();
+  private readonly chunksByGridKey = new Map<string, SplatChunk>();
   private readonly splatIdToGlobalIndex = new Map<number, number>();
   private readonly frustum = new Frustum();
   private readonly chunks: SplatChunk[];
@@ -56,6 +57,7 @@ export class SplatWorld {
 
     for (const chunk of chunks) {
       this.chunksById.set(chunk.id, chunk);
+      this.chunksByGridKey.set(gridKey(chunk.gridCoord), chunk);
     }
 
     for (let i = 0; i < splatData.count; i++) {
@@ -187,6 +189,32 @@ export class SplatWorld {
 
   public getChunkById(chunkId: number): SplatChunk | undefined {
     return this.chunksById.get(chunkId);
+  }
+
+  public getNeighborChunks(chunk: SplatChunk, radius = 1): readonly SplatChunk[] {
+    const neighbors: SplatChunk[] = [];
+
+    for (let z = -radius; z <= radius; z++) {
+      for (let y = -radius; y <= radius; y++) {
+        for (let x = -radius; x <= radius; x++) {
+          if (x === 0 && y === 0 && z === 0) {
+            continue;
+          }
+
+          const neighbor = this.chunksByGridKey.get(gridKey([
+            chunk.gridCoord[0] + x,
+            chunk.gridCoord[1] + y,
+            chunk.gridCoord[2] + z,
+          ]));
+
+          if (neighbor) {
+            neighbors.push(neighbor);
+          }
+        }
+      }
+    }
+
+    return neighbors;
   }
 
   public lookupSplat(splatId: number): ChunkLookupResult | undefined {
@@ -456,6 +484,10 @@ function worldToGridCoord(position: Vector3Tuple, boundsMin: Vector3Tuple, cellS
     Math.floor((position[1] - boundsMin[1]) / cellSize),
     Math.floor((position[2] - boundsMin[2]) / cellSize),
   ];
+}
+
+function gridKey(coord: Vector3Tuple): string {
+  return `${coord[0]},${coord[1]},${coord[2]}`;
 }
 
 function chunkIdFromCoord(coord: Vector3Tuple): number {
