@@ -3,6 +3,9 @@ import type { SplatData } from "./splatBuffer";
 const INTERNAL_SPLAT_STRIDE_BYTES = 48;
 const STANDARD_SPLAT_STRIDE_BYTES = 32;
 const SH_C0 = 0.28209479177387814;
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
 
 type PlyFormat = "ascii" | "binary_little_endian";
 
@@ -16,6 +19,33 @@ interface PlyHeader {
   vertexCount: number;
   vertexProperties: PlyProperty[];
   dataOffset: number;
+}
+
+interface SogMeta {
+  version: number;
+  count: number;
+  means: {
+    mins: [number, number, number];
+    maxs: [number, number, number];
+    files: [string, string];
+  };
+  scales: {
+    codebook: number[];
+    files: [string];
+  };
+  quats: {
+    files: [string];
+  };
+  sh0: {
+    codebook: number[];
+    files: [string];
+  };
+}
+
+interface DecodedImage {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray;
 }
 
 type PlyScalarType =
@@ -38,6 +68,10 @@ export async function loadSplatSource(
     return parsePlyBuffer(buffer);
   }
 
+  if (isZipBuffer(buffer)) {
+    return parseSogBuffer(buffer);
+  }
+
   if (buffer.byteLength % STANDARD_SPLAT_STRIDE_BYTES === 0) {
     return parseSplatBuffer(buffer);
   }
@@ -58,6 +92,14 @@ function isPlyBuffer(buffer: ArrayBuffer): boolean {
 
   const bytes = new Uint8Array(buffer, 0, 3);
   return bytes[0] === 0x70 && bytes[1] === 0x6c && bytes[2] === 0x79;
+}
+
+function isZipBuffer(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < 4) {
+    return false;
+  }
+
+  return new DataView(buffer).getUint32(0, true) === ZIP_LOCAL_FILE_HEADER_SIGNATURE;
 }
 
 function parseInternalSplatBuffer(buffer: ArrayBuffer): SplatData {
@@ -85,6 +127,94 @@ function parseInternalSplatBuffer(buffer: ArrayBuffer): SplatData {
     colors[i * 3 + 1] = Math.exp(dc1);
     colors[i * 3 + 2] = Math.exp(dc2);
     opacities[i] = 1;
+  }
+
+  return {
+    positions,
+    colors,
+    opacities,
+    covariances,
+    shCoefficients,
+    count,
+  };
+}
+
+async function parseSogBuffer(buffer: ArrayBuffer): Promise<SplatData> {
+  const files = await unzipFiles(buffer);
+  const metaBytes = files.get("meta.json");
+
+  if (!metaBytes) {
+    throw new Error("Invalid SOG: missing meta.json.");
+  }
+
+  const meta = JSON.parse(new TextDecoder().decode(metaBytes)) as SogMeta;
+
+  if (meta.version !== 2) {
+    throw new Error(`Unsupported SOG version "${meta.version}". Expected version 2.`);
+  }
+
+  const requiredFiles = [
+    ...meta.means.files,
+    ...meta.scales.files,
+    ...meta.quats.files,
+    ...meta.sh0.files,
+  ];
+
+  for (const fileName of requiredFiles) {
+    if (!files.has(fileName)) {
+      throw new Error(`Invalid SOG: missing "${fileName}".`);
+    }
+  }
+
+  const meansL = await decodeImage(files.get(meta.means.files[0])!, meta.means.files[0]);
+  const meansU = await decodeImage(files.get(meta.means.files[1])!, meta.means.files[1]);
+  const scalesImage = await decodeImage(files.get(meta.scales.files[0])!, meta.scales.files[0]);
+  const quatsImage = await decodeImage(files.get(meta.quats.files[0])!, meta.quats.files[0]);
+  const sh0Image = await decodeImage(files.get(meta.sh0.files[0])!, meta.sh0.files[0]);
+  const count = meta.count;
+
+  if (
+    meansL.width * meansL.height < count ||
+    meansU.width * meansU.height < count ||
+    scalesImage.width * scalesImage.height < count ||
+    quatsImage.width * quatsImage.height < count ||
+    sh0Image.width * sh0Image.height < count
+  ) {
+    throw new Error("Invalid SOG: one or more attribute images are smaller than meta.count.");
+  }
+
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const opacities = new Float32Array(count);
+  const covariances = new Float32Array(count * 6);
+  const shCoefficients = new Float32Array(0);
+
+  for (let i = 0; i < count; i++) {
+    const imageOffset = i * 4;
+    const base3 = i * 3;
+    const base6 = i * 6;
+    const px = unlogSogCoordinate(unpackSogCoordinate(meansL.data[imageOffset], meansU.data[imageOffset], meta.means.mins[0], meta.means.maxs[0]));
+    const py = unlogSogCoordinate(unpackSogCoordinate(meansL.data[imageOffset + 1], meansU.data[imageOffset + 1], meta.means.mins[1], meta.means.maxs[1]));
+    const pz = unlogSogCoordinate(unpackSogCoordinate(meansL.data[imageOffset + 2], meansU.data[imageOffset + 2], meta.means.mins[2], meta.means.maxs[2]));
+    positions[base3] = px;
+    positions[base3 + 1] = -py;
+    positions[base3 + 2] = pz;
+
+    const sx = decodeSogScale(meta.scales.codebook[scalesImage.data[imageOffset]]);
+    const sy = decodeSogScale(meta.scales.codebook[scalesImage.data[imageOffset + 1]]);
+    const sz = decodeSogScale(meta.scales.codebook[scalesImage.data[imageOffset + 2]]);
+    const [qx, qy, qz, qw] = unpackSogQuaternion(
+      quatsImage.data[imageOffset],
+      quatsImage.data[imageOffset + 1],
+      quatsImage.data[imageOffset + 2],
+      quatsImage.data[imageOffset + 3],
+    );
+    writeCovariance(covariances, base6, sx, sy, sz, qx, qy, qz, qw, true);
+
+    colors[base3] = clamp01(0.5 + SH_C0 * (meta.sh0.codebook[sh0Image.data[imageOffset]] ?? 0));
+    colors[base3 + 1] = clamp01(0.5 + SH_C0 * (meta.sh0.codebook[sh0Image.data[imageOffset + 1]] ?? 0));
+    colors[base3 + 2] = clamp01(0.5 + SH_C0 * (meta.sh0.codebook[sh0Image.data[imageOffset + 2]] ?? 0));
+    opacities[i] = sh0Image.data[imageOffset + 3] / 255;
   }
 
   return {
@@ -144,6 +274,161 @@ function parseSplatBuffer(buffer: ArrayBuffer): SplatData {
     shCoefficients,
     count,
   };
+}
+
+async function unzipFiles(buffer: ArrayBuffer): Promise<Map<string, Uint8Array>> {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const eocdOffset = findEndOfCentralDirectory(view);
+  const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true);
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  const files = new Map<string, Uint8Array>();
+  let offset = centralDirectoryOffset;
+
+  for (let i = 0; i < entryCount; i++) {
+    if (view.getUint32(offset, true) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
+      throw new Error("Invalid ZIP/SOG: central directory entry is malformed.");
+    }
+
+    const compressionMethod = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const fileNameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+    const fileName = decodeZipFileName(bytes.subarray(offset + 46, offset + 46 + fileNameLength));
+    const localNameLength = view.getUint16(localHeaderOffset + 26, true);
+    const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+    const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
+    const compressed = bytes.slice(dataOffset, dataOffset + compressedSize);
+
+    if (view.getUint32(localHeaderOffset, true) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+      throw new Error(`Invalid ZIP/SOG: local file header for "${fileName}" is malformed.`);
+    }
+
+    if (!fileName.endsWith("/")) {
+      files.set(fileName, await decompressZipEntry(compressed, compressionMethod));
+    }
+
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+
+  return files;
+}
+
+async function decompressZipEntry(compressed: Uint8Array, compressionMethod: number): Promise<Uint8Array> {
+  if (compressionMethod === 0) {
+    return compressed;
+  }
+
+  if (compressionMethod !== 8) {
+    throw new Error(`Unsupported ZIP compression method "${compressionMethod}" in SOG.`);
+  }
+
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("This browser does not support DecompressionStream, which is required for compressed .sog files.");
+  }
+
+  const stream = new Blob([toArrayBuffer(compressed)]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function findEndOfCentralDirectory(view: DataView): number {
+  const minOffset = Math.max(0, view.byteLength - 0xffff - 22);
+
+  for (let offset = view.byteLength - 22; offset >= minOffset; offset--) {
+    if (view.getUint32(offset, true) === ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
+      return offset;
+    }
+  }
+
+  throw new Error("Invalid ZIP/SOG: missing end of central directory.");
+}
+
+function decodeZipFileName(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+async function decodeImage(bytes: Uint8Array, label: string): Promise<DecodedImage> {
+  const image = await createImageBitmap(new Blob([toArrayBuffer(bytes)], { type: getImageMimeType(label) }), {
+    colorSpaceConversion: "none",
+  });
+  const canvas = new OffscreenCanvas(image.width, image.height);
+  const context = canvas.getContext("2d", {
+    colorSpace: "srgb",
+    willReadFrequently: true,
+  });
+
+  if (!context) {
+    throw new Error(`Could not decode SOG image "${label}".`);
+  }
+
+  context.drawImage(image, 0, 0);
+  const data = context.getImageData(0, 0, image.width, image.height).data;
+  image.close();
+  return {
+    width: canvas.width,
+    height: canvas.height,
+    data,
+  };
+}
+
+function getImageMimeType(label: string): string {
+  if (label.toLowerCase().endsWith(".png")) {
+    return "image/png";
+  }
+
+  return "image/webp";
+}
+
+function unpackSogCoordinate(lowByte: number, highByte: number, min: number, max: number): number {
+  const quantized = (highByte << 8) | lowByte;
+  return min + (max - min) * (quantized / 65535);
+}
+
+function unlogSogCoordinate(value: number): number {
+  return Math.sign(value) * (Math.exp(Math.abs(value)) - 1);
+}
+
+function decodeSogScale(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return 1e-6;
+  }
+
+  const scale = value as number;
+  return scale > 0 ? scale : Math.exp(scale);
+}
+
+function unpackSogQuaternion(a: number, b: number, c: number, mode: number): [number, number, number, number] {
+  const values = [
+    (a / 255 - 0.5) * 2 / Math.SQRT2,
+    (b / 255 - 0.5) * 2 / Math.SQRT2,
+    (c / 255 - 0.5) * 2 / Math.SQRT2,
+  ];
+  const missingComponent = mode - 252;
+
+  if (missingComponent < 0 || missingComponent > 3) {
+    throw new Error(`Invalid SOG quaternion mode "${mode}".`);
+  }
+
+  const sumSq = values[0] * values[0] + values[1] * values[1] + values[2] * values[2];
+  const missingValue = Math.sqrt(Math.max(0, 1 - sumSq));
+  const quat = [0, 0, 0, 0];
+  let sourceIndex = 0;
+
+  for (let i = 0; i < 4; i++) {
+    if (i === missingComponent) {
+      quat[i] = missingValue;
+    } else {
+      quat[i] = values[sourceIndex++];
+    }
+  }
+
+  return [quat[0], quat[1], quat[2], quat[3]];
 }
 
 async function fetchSplatBuffer(source: string): Promise<ArrayBuffer> {
