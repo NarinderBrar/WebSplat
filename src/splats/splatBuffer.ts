@@ -49,6 +49,13 @@ interface ColorClusterSelectionOptions {
   maxSelectedSplats: number;
 }
 
+interface ChunkSelectionIndex {
+  chunk: SplatChunk;
+  spatialCellSize: number;
+  spatialCells: Map<string, Uint32Array>;
+  colorBins: Map<number, Uint32Array>;
+}
+
 export interface ScreenColorSelectionOptions {
   screenX: number;
   screenY: number;
@@ -62,6 +69,7 @@ export interface ScreenColorSelectionOptions {
 }
 
 const LOCAL_SORT_DIRECTION_EPSILON = 0.015;
+const COLOR_BIN_COUNT = 32;
 
 function createStorageBuffer(device: GPUDevice, data: Float32Array, label: string): GPUBuffer {
   const buffer = device.createBuffer({
@@ -109,6 +117,7 @@ export class SplatBuffer {
   private chunkLocalSortedIndices: Uint32Array | null = null;
   private splatChunkIds: Uint32Array | null = null;
   private chunksById = new Map<number, SplatChunk>();
+  private selectionIndicesByChunkId = new Map<number, ChunkSelectionIndex>();
   private depths: Float32Array | null = null;
   private count: number = 0;
   private renderCount: number = 0;
@@ -128,6 +137,7 @@ export class SplatBuffer {
   private indirectArgsBuffer: GPUBuffer | null = null;
   private ownsVisibleSplatIndicesBuffer = true;
   private ownsIndirectArgsBuffer = true;
+  private selectionGeneration = 0;
 
   public setData(data: SplatData): void {
     this.positions = data.positions;
@@ -216,6 +226,7 @@ export class SplatBuffer {
 
   public createChunkOrderCache(chunks: readonly SplatChunk[]): void {
     this.chunksById.clear();
+    this.selectionIndicesByChunkId.clear();
     this.chunkLocalSortedIndices = new Uint32Array(this.count);
     this.splatChunkIds = new Uint32Array(this.count);
 
@@ -230,6 +241,12 @@ export class SplatBuffer {
         const splatIndex = chunk.splatStart + i;
         this.chunkLocalSortedIndices[chunk.localSortedIndicesOffset + i] = splatIndex;
         this.splatChunkIds[splatIndex] = chunk.id;
+      }
+
+      const selectionIndex = this.createChunkSelectionIndex(chunk);
+
+      if (selectionIndex) {
+        this.selectionIndicesByChunkId.set(chunk.id, selectionIndex);
       }
     }
   }
@@ -572,11 +589,67 @@ export class SplatBuffer {
     return selectedCount;
   }
 
+  public async selectConnectedSimilarColorInScreenRadiusProgressive(
+    device: GPUDevice,
+    world: ChunkNeighborLookup,
+    options: ScreenColorSelectionOptions,
+  ): Promise<number> {
+    if (!this.positions || !this.colors || !this.visibleSplatIndices || !this.selectionMask) {
+      return 0;
+    }
+
+    const generation = ++this.selectionGeneration;
+    this.selectionMask.fill(0);
+    this.uploadSelectionMask(device);
+    await nextAnimationFrame();
+
+    if (generation !== this.selectionGeneration) {
+      return 0;
+    }
+
+    const seedIndices = this.collectScreenRadiusSeeds(options);
+    let selectedCount = 0;
+
+    for (const seedIndex of seedIndices) {
+      if (generation !== this.selectionGeneration) {
+        return selectedCount;
+      }
+
+      if (this.selectionMask[seedIndex] !== 0) {
+        continue;
+      }
+
+      const seedChunk = this.getChunkForSplatIndex(seedIndex);
+
+      if (!seedChunk) {
+        continue;
+      }
+
+      selectedCount += await this.addConnectedSimilarColorClusterProgressive(
+        device,
+        generation,
+        seedIndex,
+        seedChunk,
+        world,
+        {
+          colorThreshold: options.colorThreshold,
+          neighborRadius: Math.max(0.015, seedChunk.radius * 0.035),
+          maxCandidateChunks: 27,
+          maxSelectedSplats: 250_000,
+        },
+      );
+    }
+
+    this.uploadSelectionMask(device);
+    return selectedCount;
+  }
+
   public clearSelection(device: GPUDevice): void {
     if (!this.selectionMask) {
       return;
     }
 
+    this.selectionGeneration++;
     this.selectionMask.fill(0);
     this.uploadSelectionMask(device);
   }
@@ -625,6 +698,7 @@ export class SplatBuffer {
     this.chunkLocalSortedIndices = null;
     this.splatChunkIds = null;
     this.chunksById.clear();
+    this.selectionIndicesByChunkId.clear();
     this.depths = null;
     this.count = 0;
     this.renderCount = 0;
@@ -727,8 +801,12 @@ export class SplatBuffer {
     const view = options.viewMatrix;
     let nearestDepth = Number.POSITIVE_INFINITY;
 
-    for (let i = 0; i < this.renderCount; i++) {
-      const splatIndex = this.visibleSplatIndices[i];
+    const chunkCandidates = this.collectScreenRadiusChunks(options);
+
+    for (const chunk of chunkCandidates) {
+      const end = chunk.splatStart + chunk.splatCount;
+
+      for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
       const base = splatIndex * 3;
       const x = this.positions[base];
       const y = this.positions[base + 1];
@@ -765,6 +843,7 @@ export class SplatBuffer {
         candidates.push({ index: splatIndex, distanceSq, depth });
         nearestDepth = Math.min(nearestDepth, depth);
       }
+      }
     }
 
     if (!Number.isFinite(nearestDepth)) {
@@ -779,6 +858,80 @@ export class SplatBuffer {
       .sort((a, b) => a.distanceSq - b.distanceSq);
 
     return this.pickColorDiverseSeeds(frontCandidates, options.colorThreshold);
+  }
+
+  private collectScreenRadiusChunks(options: ScreenColorSelectionOptions): SplatChunk[] {
+    const chunks: SplatChunk[] = [];
+
+    for (const index of this.selectionIndicesByChunkId.values()) {
+      const bounds = this.projectChunkScreenBounds(index.chunk, options);
+
+      if (!bounds) {
+        continue;
+      }
+
+      const closestX = Math.max(bounds.minX, Math.min(options.screenX, bounds.maxX));
+      const closestY = Math.max(bounds.minY, Math.min(options.screenY, bounds.maxY));
+      const dx = closestX - options.screenX;
+      const dy = closestY - options.screenY;
+
+      if (dx * dx + dy * dy <= options.screenRadius * options.screenRadius) {
+        chunks.push(index.chunk);
+      }
+    }
+
+    return chunks;
+  }
+
+  private projectChunkScreenBounds(
+    chunk: SplatChunk,
+    options: ScreenColorSelectionOptions,
+  ): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const corners = [
+      [chunk.boundsMin[0], chunk.boundsMin[1], chunk.boundsMin[2]],
+      [chunk.boundsMax[0], chunk.boundsMin[1], chunk.boundsMin[2]],
+      [chunk.boundsMin[0], chunk.boundsMax[1], chunk.boundsMin[2]],
+      [chunk.boundsMax[0], chunk.boundsMax[1], chunk.boundsMin[2]],
+      [chunk.boundsMin[0], chunk.boundsMin[1], chunk.boundsMax[2]],
+      [chunk.boundsMax[0], chunk.boundsMin[1], chunk.boundsMax[2]],
+      [chunk.boundsMin[0], chunk.boundsMax[1], chunk.boundsMax[2]],
+      [chunk.boundsMax[0], chunk.boundsMax[1], chunk.boundsMax[2]],
+    ];
+    const m = options.viewProjectionMatrix;
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    let projected = false;
+
+    for (const corner of corners) {
+      const x = corner[0];
+      const y = corner[1];
+      const z = corner[2];
+      const clipX = m[0] * x + m[4] * y + m[8] * z + m[12];
+      const clipY = m[1] * x + m[5] * y + m[9] * z + m[13];
+      const clipW = m[3] * x + m[7] * y + m[11] * z + m[15];
+
+      if (clipW <= 0.001) {
+        continue;
+      }
+
+      const ndcX = clipX / clipW;
+      const ndcY = clipY / clipW;
+      const pixelX = (ndcX * 0.5 + 0.5) * options.viewportWidth;
+      const pixelY = (0.5 - ndcY * 0.5) * options.viewportHeight;
+      minX = Math.min(minX, pixelX);
+      minY = Math.min(minY, pixelY);
+      maxX = Math.max(maxX, pixelX);
+      maxY = Math.max(maxY, pixelY);
+      projected = true;
+    }
+
+    if (!projected || maxX < 0 || maxY < 0 || minX > options.viewportWidth || minY > options.viewportHeight) {
+      return null;
+    }
+
+    return { minX, minY, maxX, maxY };
   }
 
   private pickColorDiverseSeeds(
@@ -861,9 +1014,96 @@ export class SplatBuffer {
     );
   }
 
+  private async addConnectedSimilarColorClusterProgressive(
+    device: GPUDevice,
+    generation: number,
+    seedGlobalIndex: number,
+    seedChunk: SplatChunk,
+    world: ChunkNeighborLookup,
+    options: ColorClusterSelectionOptions,
+  ): Promise<number> {
+    if (!this.positions || !this.colors || !this.selectionMask || generation !== this.selectionGeneration) {
+      return 0;
+    }
+
+    const seedBase = seedGlobalIndex * 3;
+    const seedR = this.colors[seedBase];
+    const seedG = this.colors[seedBase + 1];
+    const seedB = this.colors[seedBase + 2];
+    const thresholdSq = options.colorThreshold * options.colorThreshold;
+    const neighborRadiusSq = options.neighborRadius * options.neighborRadius;
+    const candidates = this.collectColorCandidates(seedChunk, world, seedR, seedG, seedB, thresholdSq, options);
+
+    if (!candidates.has(seedGlobalIndex)) {
+      candidates.set(seedGlobalIndex, true);
+    }
+
+    const spatialHash = this.buildSelectionSpatialHash(candidates, options.neighborRadius);
+    return this.floodSimilarColorClusterProgressive(
+      device,
+      generation,
+      seedGlobalIndex,
+      candidates,
+      spatialHash,
+      neighborRadiusSq,
+      options.maxSelectedSplats,
+    );
+  }
+
   private getChunkForSplatIndex(splatIndex: number): SplatChunk | undefined {
     const chunkId = this.splatChunkIds?.[splatIndex];
     return chunkId === undefined ? undefined : this.chunksById.get(chunkId);
+  }
+
+  private createChunkSelectionIndex(chunk: SplatChunk): ChunkSelectionIndex | null {
+    if (!this.positions || !this.colors) {
+      return null;
+    }
+
+    const spatialCellSize = Math.max(0.015, chunk.radius * 0.035);
+    const spatialBuckets = new Map<string, number[]>();
+    const colorBuckets = new Map<number, number[]>();
+    const end = chunk.splatStart + chunk.splatCount;
+
+    for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+      const spatialKey = this.selectionCellKey(splatIndex, spatialCellSize);
+      const spatialBucket = spatialBuckets.get(spatialKey);
+
+      if (spatialBucket) {
+        spatialBucket.push(splatIndex);
+      } else {
+        spatialBuckets.set(spatialKey, [splatIndex]);
+      }
+
+      const colorKey = this.quantizedColorKey(splatIndex);
+      const colorBucket = colorBuckets.get(colorKey);
+
+      if (colorBucket) {
+        colorBucket.push(splatIndex);
+      } else {
+        colorBuckets.set(colorKey, [splatIndex]);
+      }
+    }
+
+    return {
+      chunk,
+      spatialCellSize,
+      spatialCells: freezeIndexBuckets(spatialBuckets),
+      colorBins: freezeIndexBuckets(colorBuckets),
+    };
+  }
+
+  private quantizedColorKey(splatIndex: number): number {
+    if (!this.colors) {
+      return 0;
+    }
+
+    const base = splatIndex * 3;
+    return packedColorBin(
+      colorBin(this.colors[base]),
+      colorBin(this.colors[base + 1]),
+      colorBin(this.colors[base + 2]),
+    );
   }
 
   private collectColorCandidates(
@@ -886,9 +1126,15 @@ export class SplatBuffer {
     }
 
     for (const chunk of chunks) {
-      const end = chunk.splatStart + chunk.splatCount;
+      const sourceIndices = this.getColorCandidateIndicesForChunk(
+        chunk,
+        seedR,
+        seedG,
+        seedB,
+        options.colorThreshold,
+      );
 
-      for (let i = chunk.splatStart; i < end; i++) {
+      for (const i of sourceIndices) {
         const base = i * 3;
         const dr = this.colors[base] - seedR;
         const dg = this.colors[base + 1] - seedG;
@@ -901,6 +1147,67 @@ export class SplatBuffer {
     }
 
     return candidates;
+  }
+
+  private getColorCandidateIndicesForChunk(
+    chunk: SplatChunk,
+    r: number,
+    g: number,
+    b: number,
+    threshold: number,
+  ): number[] {
+    const index = this.selectionIndicesByChunkId.get(chunk.id);
+
+    if (!index) {
+      const fallback: number[] = [];
+      const end = chunk.splatStart + chunk.splatCount;
+
+      for (let i = chunk.splatStart; i < end; i++) {
+        fallback.push(i);
+      }
+
+      return fallback;
+    }
+
+    const radius = Math.max(1, Math.ceil(threshold * COLOR_BIN_COUNT));
+    const cr = colorBin(r);
+    const cg = colorBin(g);
+    const cb = colorBin(b);
+    const result: number[] = [];
+
+    for (let dz = -radius; dz <= radius; dz++) {
+      const bz = cb + dz;
+
+      if (bz < 0 || bz >= COLOR_BIN_COUNT) {
+        continue;
+      }
+
+      for (let dy = -radius; dy <= radius; dy++) {
+        const by = cg + dy;
+
+        if (by < 0 || by >= COLOR_BIN_COUNT) {
+          continue;
+        }
+
+        for (let dx = -radius; dx <= radius; dx++) {
+          const bx = cr + dx;
+
+          if (bx < 0 || bx >= COLOR_BIN_COUNT) {
+            continue;
+          }
+
+          const bucket = index.colorBins.get(packedColorBin(bx, by, bz));
+
+          if (bucket) {
+            for (const splatIndex of bucket) {
+              result.push(splatIndex);
+            }
+          }
+        }
+      }
+    }
+
+    return result;
   }
 
   private buildSelectionSpatialHash(candidates: ReadonlyMap<number, true>, cellSize: number): Map<string, number[]> {
@@ -956,6 +1263,64 @@ export class SplatBuffer {
     }
 
     return visited.size;
+  }
+
+  private async floodSimilarColorClusterProgressive(
+    device: GPUDevice,
+    generation: number,
+    seedGlobalIndex: number,
+    candidates: ReadonlyMap<number, true>,
+    spatialHash: ReadonlyMap<string, readonly number[]>,
+    neighborRadiusSq: number,
+    maxSelectedSplats: number,
+  ): Promise<number> {
+    if (!this.positions || !this.selectionMask || !candidates.has(seedGlobalIndex)) {
+      return 0;
+    }
+
+    const queue = [seedGlobalIndex];
+    const visited = new Set<number>();
+    let readIndex = 0;
+    let selectedCount = 0;
+    let sliceStart = performance.now();
+    let processedSinceUpload = 0;
+
+    while (readIndex < queue.length && visited.size < maxSelectedSplats) {
+      if (generation !== this.selectionGeneration) {
+        return selectedCount;
+      }
+
+      const splatIndex = queue[readIndex++];
+
+      if (visited.has(splatIndex)) {
+        continue;
+      }
+
+      visited.add(splatIndex);
+
+      if (this.selectionMask[splatIndex] === 0) {
+        this.selectionMask[splatIndex] = 1;
+        selectedCount++;
+      }
+
+      for (const neighborIndex of this.findSelectionNeighbors(splatIndex, spatialHash, neighborRadiusSq)) {
+        if (!visited.has(neighborIndex)) {
+          queue.push(neighborIndex);
+        }
+      }
+
+      processedSinceUpload++;
+
+      if (processedSinceUpload >= 4096 || performance.now() - sliceStart > 6) {
+        this.uploadSelectionMask(device);
+        await nextAnimationFrame();
+        sliceStart = performance.now();
+        processedSinceUpload = 0;
+      }
+    }
+
+    this.uploadSelectionMask(device);
+    return selectedCount;
   }
 
   private findSelectionNeighbors(
@@ -1081,4 +1446,28 @@ function shouldApplyTileBudget(plan: ChunkRenderPlan, options: TileBudgetOptions
   const depthDistance = Math.abs(plan.depthKey);
   return plan.screenRadius <= options.maxProtectedScreenRadius &&
     depthDistance >= options.protectedNearDepth;
+}
+
+function freezeIndexBuckets<Key>(source: Map<Key, number[]>): Map<Key, Uint32Array> {
+  const frozen = new Map<Key, Uint32Array>();
+
+  for (const [key, values] of source) {
+    frozen.set(key, Uint32Array.from(values));
+  }
+
+  return frozen;
+}
+
+function colorBin(value: number): number {
+  return Math.max(0, Math.min(COLOR_BIN_COUNT - 1, Math.floor(value * COLOR_BIN_COUNT)));
+}
+
+function packedColorBin(r: number, g: number, b: number): number {
+  return r | (g << 5) | (b << 10);
+}
+
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
 }

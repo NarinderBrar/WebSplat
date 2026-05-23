@@ -69,7 +69,7 @@ function bindSelectionClick(
     }
 
     const options = modeState.getSelectionOptions();
-    viewer.selectSimilarColorInRadiusAt(
+    void viewer.selectSimilarColorInRadiusAt(
       event.clientX,
       event.clientY,
       options.screenRadius,

@@ -249,17 +249,17 @@ export default class GaussianSplatViewer {
     );
   }
 
-  selectSimilarColorInRadiusAt(
+  async selectSimilarColorInRadiusAt(
     clientX: number,
     clientY: number,
     screenRadius: number,
     colorThreshold: number,
-  ): number {
+  ): Promise<number> {
     const rect = this.gpu.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
     const y = ((clientY - rect.top) / rect.height) * this.gpu.canvas.height;
 
-    return this.splatBuffer.selectConnectedSimilarColorInScreenRadius(
+    return this.splatBuffer.selectConnectedSimilarColorInScreenRadiusProgressive(
       this.gpu.device,
       this.world,
       {
