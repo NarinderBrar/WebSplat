@@ -1,5 +1,5 @@
 import { GizmoManager } from "@babylonjs/core/Gizmos/gizmoManager";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { OrbitCamera } from "../camera/orbit-camera";
 import type { HsvAdjust, ScreenPoint, ScreenRect, SelectionMode } from "../editor/types";
@@ -21,6 +21,7 @@ export interface GaussianSplatViewerOptions {
   canvas: HTMLCanvasElement;
   source?: string | ArrayBuffer;
   qualityMode?: RenderQualityMode;
+  optimized?: boolean;
 }
 
 export default class GaussianSplatViewer {
@@ -36,6 +37,7 @@ export default class GaussianSplatViewer {
   private readonly debugStatsOverlay: DebugStatsOverlay;
   private readonly qualityMode: RenderQualityMode;
   private readonly renderBackend: GpuRenderBackend;
+  private readonly optimized: boolean;
   private rafId: number | null = null;
   private isRunning = false;
   private lastFrameMs = 16.6;
@@ -48,6 +50,8 @@ export default class GaussianSplatViewer {
   private moveGizmoManager: GizmoManager | null = null;
   private moveTransformNode: TransformNode | null = null;
   private moveStartPosition: Vector3 | null = null;
+  private transformStartRotation: Quaternion | null = null;
+  private transformStartScaling: Vector3 | null = null;
   private moveActive = false;
 
   private constructor(
@@ -63,6 +67,7 @@ export default class GaussianSplatViewer {
     debugStatsOverlay: DebugStatsOverlay,
     qualityMode: RenderQualityMode,
     renderBackend: GpuRenderBackend,
+    optimized: boolean,
   ) {
     this.gpu = gpu;
     this.renderer = renderer;
@@ -76,11 +81,13 @@ export default class GaussianSplatViewer {
     this.debugStatsOverlay = debugStatsOverlay;
     this.qualityMode = qualityMode;
     this.renderBackend = renderBackend;
+    this.optimized = optimized;
   }
 
   static async create(
     options: GaussianSplatViewerOptions,
   ): Promise<GaussianSplatViewer> {
+    const optimized = options.optimized ?? false;
     const gpu = await GpuContext.create(options.canvas);
     gpu.setRenderScale(getRenderScale(options.qualityMode ?? "gpu-balanced"));
     const renderer = new GaussianRenderer(gpu);
@@ -115,7 +122,9 @@ export default class GaussianSplatViewer {
       chunkCount: world.getChunks().length,
       splatCount: world.getSplatData().count,
     });
-    const renderBackend = getRenderBackend(options.qualityMode ?? "performance");
+    const renderBackend = optimized
+      ? getRenderBackend(options.qualityMode ?? "performance")
+      : "cpuChunkBinned";
     const gpuDepthBinPass = createGpuDepthBinPass(
       gpu.device,
       renderer.getCameraBindGroupLayout(),
@@ -124,6 +133,7 @@ export default class GaussianSplatViewer {
       options.qualityMode ?? "performance",
       gpu.canvas.height,
       renderBackend,
+      optimized,
     );
 
     if (gpuDepthBinPass) {
@@ -141,6 +151,7 @@ export default class GaussianSplatViewer {
       splatBuffer,
       world.getSplatData().count,
       options.qualityMode ?? "performance",
+      optimized,
     );
 
     if (gpuTilePressurePass) {
@@ -164,6 +175,7 @@ export default class GaussianSplatViewer {
       new DebugStatsOverlay(),
       options.qualityMode ?? "performance",
       renderBackend,
+      optimized,
     );
   }
 
@@ -220,6 +232,7 @@ export default class GaussianSplatViewer {
 
   setOrbitControlsEnabled(enabled: boolean): void {
     this.camera.setControlsEnabled(enabled);
+    this.camera.setGizmoPointerEnabled(enabled);
   }
 
   setSelectionHighlightVisible(visible: boolean): void {
@@ -406,7 +419,7 @@ export default class GaussianSplatViewer {
     this.splatBuffer.unhideAllSplats(this.gpu.device);
   }
 
-  beginMoveSelected(): boolean {
+  beginMoveSelected(mode: "move" | "rotate" | "scale" = "move"): boolean {
     const centroid = this.splatBuffer.beginMoveEdit();
 
     if (!centroid) {
@@ -419,8 +432,16 @@ export default class GaussianSplatViewer {
     }
 
     this.moveTransformNode.position.set(centroid[0], centroid[1], centroid[2]);
+    this.moveTransformNode.rotation.set(0, 0, 0);
+    this.moveTransformNode.rotationQuaternion = Quaternion.Identity();
+    this.moveTransformNode.scaling.set(1, 1, 1);
     this.moveStartPosition = this.moveTransformNode.position.clone();
+    this.transformStartRotation = this.moveTransformNode.rotationQuaternion.clone();
+    this.transformStartScaling = this.moveTransformNode.scaling.clone();
+    this.configureTransformGizmo(mode);
     this.moveGizmoManager.attachToNode(this.moveTransformNode);
+    this.camera.setGizmoPointerEnabled(true);
+    this.camera.setControlsEnabled(false);
     this.moveActive = true;
     return true;
   }
@@ -429,12 +450,25 @@ export default class GaussianSplatViewer {
     this.splatBuffer.previewMoveEdit(this.gpu.device, delta);
   }
 
+  setTransformToolMode(mode: "move" | "rotate" | "scale"): void {
+    this.configureTransformGizmo(mode);
+
+    if (this.moveTransformNode && this.moveGizmoManager) {
+      this.moveGizmoManager.attachToNode(this.moveTransformNode);
+      this.camera.setGizmoPointerEnabled(true);
+      this.camera.setControlsEnabled(false);
+    }
+  }
+
   commitMoveSelected(): void {
     this.splatBuffer.commitMoveEdit();
     this.splatBuffer.createChunkMetadataBuffer(this.gpu.device, this.world.packGpuMetadata());
     this.moveActive = false;
     this.moveStartPosition = null;
+    this.transformStartRotation = null;
+    this.transformStartScaling = null;
     this.moveGizmoManager?.attachToNode(null);
+    this.camera.setGizmoPointerEnabled(false);
   }
 
   private readonly resize = (): void => {
@@ -473,6 +507,7 @@ export default class GaussianSplatViewer {
         this.gpu.device,
         createTileBudgetOptions(
           this.qualityMode,
+          this.optimized,
           this.gpu.canvas.width,
           this.gpu.canvas.height,
           this.camera.getViewProjectionMatrix(),
@@ -514,21 +549,46 @@ export default class GaussianSplatViewer {
 
     if (!this.moveGizmoManager) {
       this.moveGizmoManager = new GizmoManager(this.camera.getBabylonScene());
-      this.moveGizmoManager.positionGizmoEnabled = true;
-      this.moveGizmoManager.rotationGizmoEnabled = false;
-      this.moveGizmoManager.scaleGizmoEnabled = false;
       this.moveGizmoManager.boundingBoxGizmoEnabled = false;
       this.moveGizmoManager.usePointerToAttachGizmos = false;
     }
   }
 
+  private configureTransformGizmo(mode: "move" | "rotate" | "scale"): void {
+    if (!this.moveGizmoManager) {
+      return;
+    }
+
+    this.moveGizmoManager.positionGizmoEnabled = mode === "move";
+    this.moveGizmoManager.rotationGizmoEnabled = mode === "rotate";
+    this.moveGizmoManager.scaleGizmoEnabled = mode === "scale";
+  }
+
   private updateMoveGizmoEdit(): void {
-    if (!this.moveActive || !this.moveTransformNode || !this.moveStartPosition) {
+    if (
+      !this.moveActive ||
+      !this.moveTransformNode ||
+      !this.moveStartPosition ||
+      !this.transformStartRotation ||
+      !this.transformStartScaling
+    ) {
       return;
     }
 
     const delta = this.moveTransformNode.position.subtract(this.moveStartPosition);
-    this.splatBuffer.previewMoveEdit(this.gpu.device, [delta.x, delta.y, delta.z]);
+    const rotation = this.moveTransformNode.rotationQuaternion ?? Quaternion.FromEulerVector(this.moveTransformNode.rotation);
+    const relativeRotation = rotation.multiply(this.transformStartRotation.conjugate());
+    const scaling = this.moveTransformNode.scaling;
+    this.splatBuffer.previewTransformEdit(
+      this.gpu.device,
+      [delta.x, delta.y, delta.z],
+      [relativeRotation.x, relativeRotation.y, relativeRotation.z, relativeRotation.w],
+      [
+        scaling.x / Math.max(1e-6, this.transformStartScaling.x),
+        scaling.y / Math.max(1e-6, this.transformStartScaling.y),
+        scaling.z / Math.max(1e-6, this.transformStartScaling.z),
+      ],
+    );
   }
 }
 
@@ -544,12 +604,13 @@ function getRenderBackend(qualityMode: RenderQualityMode): GpuRenderBackend {
 
 function createTileBudgetOptions(
   qualityMode: RenderQualityMode,
+  optimized: boolean,
   viewportWidth: number,
   viewportHeight: number,
   viewProjectionMatrix: Float32Array,
   gpuTilePressure?: GpuTilePressureTelemetry,
 ): TileBudgetOptions {
-  if (qualityMode === "quality") {
+  if (!optimized || qualityMode === "quality") {
     return {
       enabled: false,
       tileSize: 64,
@@ -603,8 +664,9 @@ function createGpuTilePressurePass(
   splatBuffer: SplatBuffer,
   splatCount: number,
   qualityMode: RenderQualityMode,
+  optimized: boolean,
 ): GpuTilePressurePass | null {
-  if (qualityMode === "quality") {
+  if (!optimized || qualityMode === "quality") {
     return null;
   }
 
@@ -633,8 +695,9 @@ function createGpuDepthBinPass(
   qualityMode: RenderQualityMode,
   viewportHeight: number,
   renderBackend: GpuRenderBackend,
+  optimized: boolean,
 ): GpuDepthBinPass | null {
-  if (renderBackend !== "gpuDepthBinned") {
+  if (!optimized || renderBackend !== "gpuDepthBinned") {
     return null;
   }
 

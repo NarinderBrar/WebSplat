@@ -1,5 +1,6 @@
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
-import { NullEngine } from "@babylonjs/core/Engines/nullEngine";
+import { Engine } from "@babylonjs/core/Engines/engine";
+import { Color4 } from "@babylonjs/core/Maths/math.color";
 import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Scene } from "@babylonjs/core/scene";
 import { CameraUniforms } from "./camera-uniforms";
@@ -14,10 +15,11 @@ export interface OrbitCameraState {
 export class OrbitCamera {
   public readonly uniforms: CameraUniforms;
 
-  private readonly engine: NullEngine;
+  private readonly engine: Engine;
   private readonly scene: Scene;
   private readonly camera: ArcRotateCamera;
   private readonly canvas: HTMLCanvasElement;
+  private readonly overlayCanvas: HTMLCanvasElement;
   private readonly viewMatrix = new Float32Array(16);
   private readonly projectionMatrix = new Float32Array(16);
   private readonly viewProjectionMatrix = new Float32Array(16);
@@ -30,15 +32,20 @@ export class OrbitCamera {
     cameraBindGroupLayout: GPUBindGroupLayout,
   ) {
     this.canvas = canvas;
-    this.engine = new NullEngine({
-      renderWidth: canvas.width,
-      renderHeight: canvas.height,
-      textureSize: Math.max(canvas.width, canvas.height, 512),
-      deterministicLockstep: false,
-      lockstepMaxSteps: 4,
-      renderingCanvas: canvas,
-    });
+    this.overlayCanvas = createBabylonOverlayCanvas(canvas);
+    this.engine = new Engine(
+      this.overlayCanvas,
+      true,
+      {
+        alpha: true,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: true,
+      },
+      true,
+    );
     this.scene = new Scene(this.engine);
+    this.scene.clearColor = new Color4(0, 0, 0, 0);
+    this.scene.autoClear = true;
     this.camera = new ArcRotateCamera(
       "viewerCamera",
       -Math.PI / 2,
@@ -54,7 +61,7 @@ export class OrbitCamera {
     this.camera.fov = Math.PI / 4;
     this.camera.wheelPrecision = 20;
     this.camera.panningSensibility = 80;
-    this.camera.attachControl(canvas, true);
+    this.camera.attachControl(this.overlayCanvas, true);
 
     this.uniforms = new CameraUniforms(device);
     this.uniforms.createBuffers(cameraBindGroupLayout);
@@ -103,10 +110,14 @@ export class OrbitCamera {
     this.controlsEnabled = enabled;
 
     if (enabled) {
-      this.camera.attachControl(this.canvas, true);
+      this.camera.attachControl(this.overlayCanvas, true);
     } else {
       this.camera.detachControl();
     }
+  }
+
+  public setGizmoPointerEnabled(enabled: boolean): void {
+    this.overlayCanvas.style.pointerEvents = enabled ? "auto" : "none";
   }
 
   public getViewMatrix(): Float32Array {
@@ -122,6 +133,7 @@ export class OrbitCamera {
   }
 
   public update(): void {
+    this.engine.resize();
     this.camera.update();
     this.camera.getViewMatrix(true).copyToArray(this.viewMatrix, 0);
 
@@ -145,6 +157,7 @@ export class OrbitCamera {
     this.uniforms.updateProjection(this.projectionMatrix);
     this.uniforms.updateViewProjection(this.viewProjectionMatrix);
     this.uniforms.upload();
+    this.scene.render();
   }
 
   public dispose(): void {
@@ -152,6 +165,7 @@ export class OrbitCamera {
     this.uniforms.dispose();
     this.scene.dispose();
     this.engine.dispose();
+    this.overlayCanvas.remove();
   }
 
   private multiplyMatrices(
@@ -168,4 +182,19 @@ export class OrbitCamera {
       }
     }
   }
+}
+
+function createBabylonOverlayCanvas(baseCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const overlayCanvas = document.createElement("canvas");
+  overlayCanvas.className = "babylon-gizmo-overlay";
+  overlayCanvas.setAttribute("aria-hidden", "true");
+  overlayCanvas.style.position = "fixed";
+  overlayCanvas.style.inset = "0";
+  overlayCanvas.style.width = "100%";
+  overlayCanvas.style.height = "100%";
+  overlayCanvas.style.zIndex = "8";
+  overlayCanvas.style.pointerEvents = "none";
+  overlayCanvas.style.background = "transparent";
+  baseCanvas.insertAdjacentElement("afterend", overlayCanvas);
+  return overlayCanvas;
 }

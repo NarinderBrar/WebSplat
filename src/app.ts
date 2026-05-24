@@ -29,6 +29,7 @@ const renderCanvas = canvas;
 const params = new URLSearchParams(window.location.search);
 const splatSource = params.get("splat") ?? undefined;
 const qualityMode = parseQualityMode(params.get("quality"));
+const optimized = parseBooleanFlag(params.get("optimized"), false);
 
 async function main(): Promise<void> {
   try {
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
       canvas: renderCanvas,
       source: splatSource,
       qualityMode,
+      optimized,
     });
     viewer.start();
     const editorState = createEditorToolbar(renderCanvas, viewer);
@@ -174,7 +176,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   let tool: EditorTool = "orbit";
   let hsvEditActive = false;
   let colorizeEditActive = false;
-  let moveActive = false;
+  let transformActive = false;
   const selectionOptions: SelectionToolOptions = {
     colorThreshold: 0.14,
     screenRadius: 12,
@@ -198,7 +200,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   const hsvControls = document.createElement("div");
   const colorizeControls = document.createElement("div");
   const hideControls = document.createElement("div");
-  const moveControls = document.createElement("div");
+  const transformControls = document.createElement("div");
   const thresholdInput = createNumberInput("Threshold", selectionOptions.colorThreshold, 0.01, 1, 0.01);
   const radiusInput = createNumberInput("Radius", selectionOptions.screenRadius, 1, 96, 1);
   const modeControl = createSelectionModeControl(selectionOptions);
@@ -215,7 +217,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   const colorizeCancelButton = createActionButton("Cancel");
   const hideSelectedButton = createActionButton("Hide Selected");
   const unhideAllButton = createActionButton("Unhide All");
-  const moveHint = document.createElement("span");
+  const transformHint = document.createElement("span");
   const visualizer = document.createElement("div");
 
   toolbar.className = "tool-rail";
@@ -225,9 +227,9 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   hsvControls.className = "tool-settings hsv-controls";
   colorizeControls.className = "tool-settings colorize-controls";
   hideControls.className = "tool-settings hide-controls";
-  moveControls.className = "tool-settings move-controls";
-  moveHint.className = "move-tool-status";
-  moveHint.textContent = "Gizmo";
+  transformControls.className = "tool-settings move-controls";
+  transformHint.className = "move-tool-status";
+  transformHint.textContent = "Gizmo";
   visualizer.className = "selection-radius-visualizer";
 
   const tools: Array<[EditorTool, string, string]> = [
@@ -240,6 +242,8 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     ["colorize", "Colorize", colorizeIconSvg()],
     ["hide", "Hide", hideIconSvg()],
     ["move", "Move", moveIconSvg()],
+    ["rotate", "Rotate", rotateIconSvg()],
+    ["scale", "Scale", scaleIconSvg()],
   ];
 
   for (const [toolId, label, icon] of tools) {
@@ -254,8 +258,8 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   hsvControls.append(hueInput.label, saturationInput.label, valueInput.label, hsvApplyButton, hsvCancelButton);
   colorizeControls.append(colorizeInput.label, colorizeApplyButton, colorizeCancelButton);
   hideControls.append(hideSelectedButton, unhideAllButton);
-  moveControls.append(moveHint);
-  optionsBar.append(selectionControls, paintControls, hsvControls, colorizeControls, hideControls, moveControls);
+  transformControls.append(transformHint);
+  optionsBar.append(selectionControls, paintControls, hsvControls, colorizeControls, hideControls, transformControls);
   document.body.append(toolbar, optionsBar, visualizer);
 
   thresholdInput.input.addEventListener("input", () => {
@@ -361,9 +365,9 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
       colorizeEditActive = false;
     }
 
-    if (moveActive && nextTool !== "move") {
+    if (transformActive && !isTransformTool(nextTool)) {
       viewer.commitMoveSelected();
-      moveActive = false;
+      transformActive = false;
     }
 
     tool = nextTool;
@@ -375,7 +379,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     hsvControls.hidden = tool !== "hsv";
     colorizeControls.hidden = tool !== "colorize";
     hideControls.hidden = tool !== "hide";
-    moveControls.hidden = tool !== "move";
+    transformControls.hidden = !isTransformTool(tool);
     visualizer.hidden = tool !== "brushSelect" && tool !== "paintBrush";
 
     for (const [toolId, button] of toolButtons) {
@@ -389,8 +393,10 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     } else if (tool === "colorize") {
       colorizeEditActive = viewer.beginColorizeEdit() > 0;
       updateColorize();
-    } else if (tool === "move" && !moveActive) {
-      moveActive = viewer.beginMoveSelected();
+    } else if (isTransformTool(tool) && !transformActive) {
+      transformActive = viewer.beginMoveSelected(tool);
+    } else if (isTransformTool(tool)) {
+      viewer.setTransformToolMode(tool);
     }
   }
 
@@ -419,13 +425,17 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     getPaintOptions: () => ({ ...paintOptions }),
     getHsvAdjust: () => ({ ...hsvAdjust }),
     setMoveActive: (active) => {
-      moveActive = active;
+      transformActive = active;
     },
   };
 }
 
 function isSelectionTool(tool: EditorTool): boolean {
   return tool === "brushSelect" || tool === "marqueeSelect" || tool === "lassoSelect";
+}
+
+function isTransformTool(tool: EditorTool): tool is "move" | "rotate" | "scale" {
+  return tool === "move" || tool === "rotate" || tool === "scale";
 }
 
 function createSelectionModeControl(options: SelectionToolOptions): HTMLDivElement {
@@ -690,10 +700,40 @@ function moveIconSvg(): string {
   `;
 }
 
+function rotateIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 12a8 8 0 0 1 13.7-5.6" />
+      <path d="M18 3v5h-5" />
+      <path d="M20 12a8 8 0 0 1-13.7 5.6" />
+      <path d="M6 21v-5h5" />
+    </svg>
+  `;
+}
+
+function scaleIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 20 20 4" />
+      <path d="M14 4h6v6" />
+      <path d="M10 20H4v-6" />
+      <path d="M7 7h10v10H7z" />
+    </svg>
+  `;
+}
+
 function parseQualityMode(value: string | null): RenderQualityMode {
   if (value === "quality" || value === "balanced" || value === "gpu-balanced" || value === "performance") {
     return value;
   }
 
   return "performance";
+}
+
+function parseBooleanFlag(value: string | null, fallback: boolean): boolean {
+  if (value === null) {
+    return fallback;
+  }
+
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }

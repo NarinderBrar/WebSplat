@@ -186,6 +186,7 @@ export class SplatBuffer {
   private colorizeEditIndices: Uint32Array | null = null;
   private moveEditOriginalPositions: Float32Array | null = null;
   private moveEditIndices: Uint32Array | null = null;
+  private moveEditCentroid: Vector3Tuple | null = null;
 
   public setData(data: SplatData): void {
     this.positions = data.positions;
@@ -1017,9 +1018,19 @@ export class SplatBuffer {
       return null;
     }
 
+    const centroid = this.getSelectedCentroid();
+
+    if (!centroid) {
+      this.moveEditOriginalPositions = null;
+      this.moveEditIndices = null;
+      this.moveEditCentroid = null;
+      return null;
+    }
+
     const indices = this.collectSelectedIndices();
     this.moveEditIndices = indices;
     this.moveEditOriginalPositions = new Float32Array(indices.length * 3);
+    this.moveEditCentroid = centroid;
 
     for (let i = 0; i < indices.length; i++) {
       const sourceBase = indices[i] * 3;
@@ -1029,7 +1040,7 @@ export class SplatBuffer {
       this.moveEditOriginalPositions[editBase + 2] = this.positions[sourceBase + 2];
     }
 
-    return this.getSelectedCentroid();
+    return centroid;
   }
 
   public previewMoveEdit(device: GPUDevice, delta: Vector3Tuple): void {
@@ -1048,9 +1059,37 @@ export class SplatBuffer {
     this.uploadPositions(device);
   }
 
+  public previewTransformEdit(
+    device: GPUDevice,
+    translation: Vector3Tuple,
+    rotation: [number, number, number, number],
+    scale: Vector3Tuple,
+  ): void {
+    if (!this.positions || !this.moveEditIndices || !this.moveEditOriginalPositions || !this.moveEditCentroid) {
+      return;
+    }
+
+    const [qx, qy, qz, qw] = normalizeQuaternion(rotation);
+
+    for (let i = 0; i < this.moveEditIndices.length; i++) {
+      const editBase = i * 3;
+      const targetBase = this.moveEditIndices[i] * 3;
+      const x = (this.moveEditOriginalPositions[editBase] - this.moveEditCentroid[0]) * scale[0];
+      const y = (this.moveEditOriginalPositions[editBase + 1] - this.moveEditCentroid[1]) * scale[1];
+      const z = (this.moveEditOriginalPositions[editBase + 2] - this.moveEditCentroid[2]) * scale[2];
+      const rotated = rotateVectorByQuaternion(x, y, z, qx, qy, qz, qw);
+      this.positions[targetBase] = this.moveEditCentroid[0] + translation[0] + rotated[0];
+      this.positions[targetBase + 1] = this.moveEditCentroid[1] + translation[1] + rotated[1];
+      this.positions[targetBase + 2] = this.moveEditCentroid[2] + translation[2] + rotated[2];
+    }
+
+    this.uploadPositions(device);
+  }
+
   public commitMoveEdit(): void {
     this.moveEditIndices = null;
     this.moveEditOriginalPositions = null;
+    this.moveEditCentroid = null;
     this.rebuildSelectionIndices();
     for (const chunk of this.chunksById.values()) {
       this.refreshChunkBounds(chunk);
@@ -2312,6 +2351,32 @@ function shortestHueDelta(from: number, to: number): number {
   }
 
   return delta;
+}
+
+function normalizeQuaternion(value: [number, number, number, number]): [number, number, number, number] {
+  const length = Math.hypot(value[0], value[1], value[2], value[3]) || 1;
+  return [value[0] / length, value[1] / length, value[2] / length, value[3] / length];
+}
+
+function rotateVectorByQuaternion(
+  x: number,
+  y: number,
+  z: number,
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+): Vector3Tuple {
+  const ix = qw * x + qy * z - qz * y;
+  const iy = qw * y + qz * x - qx * z;
+  const iz = qw * z + qx * y - qy * x;
+  const iw = -qx * x - qy * y - qz * z;
+
+  return [
+    ix * qw + iw * -qx + iy * -qz - iz * -qy,
+    iy * qw + iw * -qy + iz * -qx - ix * -qz,
+    iz * qw + iw * -qz + ix * -qy - iy * -qx,
+  ];
 }
 
 function nextAnimationFrame(): Promise<void> {
