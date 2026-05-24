@@ -176,7 +176,7 @@ fn vsMain(
     splatColors[base3 + 2u],
   );
   let selected = selectionMask[splatIndex] != 0u;
-  output.color = select(baseColor, mix(baseColor, vec3<f32>(1.0, 0.86, 0.18), 0.65), selected);
+  output.color = select(baseColor, mix(baseColor, vec3<f32>(0.55, 0.82, 1.0), 0.32), selected);
   output.localPos = corner;
   output.opacity  = clamp(splatOpacities[splatIndex], 0.0, 1.0);
 

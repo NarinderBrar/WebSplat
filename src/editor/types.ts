@@ -1,4 +1,4 @@
-export type EditorTool = "orbit" | "brushSelect" | "marqueeSelect" | "lassoSelect" | "hsv" | "colorize" | "move";
+export type EditorTool = "orbit" | "brushSelect" | "paintBrush" | "marqueeSelect" | "lassoSelect" | "hsv" | "colorize" | "hide" | "move";
 
 export type SelectionMode = "normal" | "additive" | "subtractive";
 

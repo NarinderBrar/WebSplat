@@ -18,14 +18,16 @@ export class DebugStatsOverlay {
         `cache ${stats.localOrderRefreshMs.toFixed(2)}ms build ${stats.visibleIndexBuildMs.toFixed(2)}ms`;
 
     this.element.textContent =
-      `${stats.backend} | ` +
-      `splats ${stats.visibleSplats}/${stats.totalSplats} | ` +
-      `chunks ${stats.visibleChunks}/${stats.totalChunks} | ` +
-      `render ${renderText} | ` +
-      `tile ${stats.tileCulledSplats}/${stats.tileTestedSplats} skip/test protect ${stats.tileProtectedSplats} | ` +
-      `gpu-tile max ${stats.gpuMaxTileSplats} hot ${stats.gpuOverloadedTiles} | ` +
-      `lod ${stats.lod0Splats}/${stats.lod1Splats}/${stats.lod2Splats}/${stats.lod3Splats} | ` +
-      `${stats.estimatedFps.toFixed(1)} fps | ` +
+      `Stats\n` +
+      `backend ${stats.backend}\n` +
+      `splats ${stats.visibleSplats}/${stats.totalSplats}\n` +
+      `chunks ${stats.visibleChunks}/${stats.totalChunks}\n` +
+      `render ${renderText}\n` +
+      `tile ${stats.tileCulledSplats}/${stats.tileTestedSplats} skip/test\n` +
+      `protect ${stats.tileProtectedSplats}\n` +
+      `gpu-tile max ${stats.gpuMaxTileSplats} hot ${stats.gpuOverloadedTiles}\n` +
+      `lod ${stats.lod0Splats}/${stats.lod1Splats}/${stats.lod2Splats}/${stats.lod3Splats}\n` +
+      `fps ${stats.estimatedFps.toFixed(1)}\n` +
       timingText;
   }
 

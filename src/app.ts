@@ -8,9 +8,16 @@ interface SelectionToolOptions {
   selectionMode: SelectionMode;
 }
 
+interface PaintBrushOptions {
+  color: [number, number, number];
+  mixFactor: number;
+  screenRadius: number;
+}
+
 interface EditorState {
   getTool(): EditorTool;
   getSelectionOptions(): SelectionToolOptions;
+  getPaintOptions(): PaintBrushOptions;
   getHsvAdjust(): HsvAdjust;
   setMoveActive(active: boolean): void;
 }
@@ -53,6 +60,7 @@ function bindEditorTools(
   let pointerDownX = 0;
   let pointerDownY = 0;
   let pointerDownButton = -1;
+  let isPaintDragging = false;
   let dragOverlay: HTMLDivElement | null = null;
   let lassoOverlay: SVGSVGElement | null = null;
   let lassoPath: SVGPolylineElement | null = null;
@@ -78,6 +86,9 @@ function bindEditorTools(
       lassoOverlay = overlay.svg;
       lassoPath = overlay.path;
       updateLassoPath(lassoPath, lassoPoints);
+    } else if (tool === "paintBrush") {
+      isPaintDragging = true;
+      paintAt(event);
     }
   });
 
@@ -99,6 +110,8 @@ function bindEditorTools(
         lassoPoints.push({ x: event.clientX, y: event.clientY });
         updateLassoPath(lassoPath, lassoPoints);
       }
+    } else if (tool === "paintBrush" && isPaintDragging) {
+      paintAt(event);
     }
   });
 
@@ -109,6 +122,7 @@ function bindEditorTools(
     }
 
     pointerDownButton = -1;
+    isPaintDragging = false;
     const tool = editorState.getTool();
     const dx = event.clientX - pointerDownX;
     const dy = event.clientY - pointerDownY;
@@ -135,6 +149,17 @@ function bindEditorTools(
     cleanupDragUi();
   });
 
+  function paintAt(event: PointerEvent): void {
+    const options = editorState.getPaintOptions();
+    viewer.paintBrushAt(
+      event.clientX,
+      event.clientY,
+      options.screenRadius,
+      options.color,
+      options.mixFactor,
+    );
+  }
+
   function cleanupDragUi(): void {
     dragOverlay?.remove();
     lassoOverlay?.remove();
@@ -155,31 +180,51 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     screenRadius: 12,
     selectionMode: "normal",
   };
+  const paintOptions: PaintBrushOptions = {
+    color: [0.85, 0.15, 0.15],
+    mixFactor: 0.35,
+    screenRadius: 18,
+  };
   const hsvAdjust: HsvAdjust = {
     hue: 0,
     saturation: 1,
     value: 1,
   };
   const toolbar = document.createElement("div");
+  const optionsBar = document.createElement("div");
   const toolButtons = new Map<EditorTool, HTMLButtonElement>();
   const selectionControls = document.createElement("div");
+  const paintControls = document.createElement("div");
   const hsvControls = document.createElement("div");
   const colorizeControls = document.createElement("div");
+  const hideControls = document.createElement("div");
   const moveControls = document.createElement("div");
   const thresholdInput = createNumberInput("Threshold", selectionOptions.colorThreshold, 0.01, 1, 0.01);
   const radiusInput = createNumberInput("Radius", selectionOptions.screenRadius, 1, 96, 1);
   const modeControl = createSelectionModeControl(selectionOptions);
+  const paintColorInput = createColorInput("Paint", "#d92626");
+  const paintMixInput = createRangeInput("Mix", 35, 1, 100, 1);
+  const paintRadiusInput = createNumberInput("Radius", paintOptions.screenRadius, 1, 128, 1);
   const hueInput = createRangeInput("Hue", 0, -180, 180, 1);
   const saturationInput = createRangeInput("Sat", 100, 0, 200, 1);
   const valueInput = createRangeInput("Val", 100, 0, 200, 1);
   const colorizeInput = createColorInput("Color", "#d82626");
+  const hsvApplyButton = createActionButton("Apply");
+  const hsvCancelButton = createActionButton("Cancel");
+  const colorizeApplyButton = createActionButton("Apply");
+  const colorizeCancelButton = createActionButton("Cancel");
+  const hideSelectedButton = createActionButton("Hide Selected");
+  const unhideAllButton = createActionButton("Unhide All");
   const moveHint = document.createElement("span");
   const visualizer = document.createElement("div");
 
-  toolbar.className = "tool-mode-toolbar editor-toolbar";
+  toolbar.className = "tool-rail";
+  optionsBar.className = "tool-options-bar";
   selectionControls.className = "tool-settings selection-controls";
+  paintControls.className = "tool-settings paint-controls";
   hsvControls.className = "tool-settings hsv-controls";
   colorizeControls.className = "tool-settings colorize-controls";
+  hideControls.className = "tool-settings hide-controls";
   moveControls.className = "tool-settings move-controls";
   moveHint.className = "move-tool-status";
   moveHint.textContent = "Gizmo";
@@ -188,10 +233,12 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   const tools: Array<[EditorTool, string, string]> = [
     ["orbit", "Orbit", orbitIconSvg()],
     ["brushSelect", "Brush select", brushIconSvg()],
+    ["paintBrush", "Paint brush", paintBrushIconSvg()],
     ["marqueeSelect", "Marquee select", marqueeIconSvg()],
     ["lassoSelect", "Lasso select", lassoIconSvg()],
     ["hsv", "HSV", hsvIconSvg()],
     ["colorize", "Colorize", colorizeIconSvg()],
+    ["hide", "Hide", hideIconSvg()],
     ["move", "Move", moveIconSvg()],
   ];
 
@@ -203,17 +250,29 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   }
 
   selectionControls.append(modeControl, thresholdInput.label, radiusInput.label);
-  hsvControls.append(hueInput.label, saturationInput.label, valueInput.label);
-  colorizeControls.append(colorizeInput.label);
+  paintControls.append(paintColorInput.label, paintMixInput.label, paintRadiusInput.label);
+  hsvControls.append(hueInput.label, saturationInput.label, valueInput.label, hsvApplyButton, hsvCancelButton);
+  colorizeControls.append(colorizeInput.label, colorizeApplyButton, colorizeCancelButton);
+  hideControls.append(hideSelectedButton, unhideAllButton);
   moveControls.append(moveHint);
-  toolbar.append(selectionControls, hsvControls, colorizeControls, moveControls);
-  document.body.append(toolbar, visualizer);
+  optionsBar.append(selectionControls, paintControls, hsvControls, colorizeControls, hideControls, moveControls);
+  document.body.append(toolbar, optionsBar, visualizer);
 
   thresholdInput.input.addEventListener("input", () => {
     selectionOptions.colorThreshold = thresholdInput.input.valueAsNumber || 0.14;
   });
   radiusInput.input.addEventListener("input", () => {
     selectionOptions.screenRadius = radiusInput.input.valueAsNumber || 12;
+    updateVisualizerSize();
+  });
+  paintColorInput.input.addEventListener("input", () => {
+    paintOptions.color = hexToRgb(paintColorInput.input.value);
+  });
+  paintMixInput.input.addEventListener("input", () => {
+    paintOptions.mixFactor = Math.max(0, Math.min(1, (paintMixInput.input.valueAsNumber || 35) / 100));
+  });
+  paintRadiusInput.input.addEventListener("input", () => {
+    paintOptions.screenRadius = paintRadiusInput.input.valueAsNumber || 18;
     updateVisualizerSize();
   });
 
@@ -233,13 +292,21 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
 
   for (const input of [hueInput.input, saturationInput.input, valueInput.input]) {
     input.addEventListener("input", updateHsv);
-    input.addEventListener("change", () => {
-      if (hsvEditActive) {
-        viewer.commitHsvEdit();
-        hsvEditActive = false;
-      }
-    });
   }
+
+  hsvApplyButton.addEventListener("click", () => {
+    if (hsvEditActive) {
+      viewer.commitHsvEdit();
+      hsvEditActive = false;
+    }
+  });
+  hsvCancelButton.addEventListener("click", () => {
+    if (hsvEditActive) {
+      viewer.cancelHsvEdit();
+      hsvEditActive = false;
+    }
+    resetHsvInputs();
+  });
 
   const updateColorize = (): void => {
     if (!colorizeEditActive) {
@@ -252,31 +319,45 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   };
 
   colorizeInput.input.addEventListener("input", updateColorize);
-  colorizeInput.input.addEventListener("change", () => {
+  colorizeApplyButton.addEventListener("click", () => {
     if (colorizeEditActive) {
       viewer.commitColorizeEdit();
       colorizeEditActive = false;
     }
   });
+  colorizeCancelButton.addEventListener("click", () => {
+    if (colorizeEditActive) {
+      viewer.cancelColorizeEdit();
+      colorizeEditActive = false;
+    }
+  });
+  hideSelectedButton.addEventListener("click", () => {
+    viewer.hideSelectedSplats();
+  });
+  unhideAllButton.addEventListener("click", () => {
+    viewer.unhideAllSplats();
+  });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (tool !== "brushSelect") {
+    if (tool !== "brushSelect" && tool !== "paintBrush") {
       return;
     }
 
-    visualizer.style.transform = `translate(${event.clientX - selectionOptions.screenRadius}px, ${event.clientY - selectionOptions.screenRadius}px)`;
+    const radius = tool === "paintBrush" ? paintOptions.screenRadius : selectionOptions.screenRadius;
+    visualizer.style.transform = `translate(${event.clientX - radius}px, ${event.clientY - radius}px)`;
   });
   canvas.addEventListener("pointerleave", () => visualizer.classList.add("is-hidden"));
   canvas.addEventListener("pointerenter", () => visualizer.classList.remove("is-hidden"));
 
   function setTool(nextTool: EditorTool): void {
     if (hsvEditActive) {
-      viewer.commitHsvEdit();
+      viewer.cancelHsvEdit();
       hsvEditActive = false;
+      resetHsvInputs();
     }
 
     if (colorizeEditActive) {
-      viewer.commitColorizeEdit();
+      viewer.cancelColorizeEdit();
       colorizeEditActive = false;
     }
 
@@ -288,12 +369,14 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     tool = nextTool;
     canvas.dataset.toolMode = tool;
     viewer.setOrbitControlsEnabled(tool === "orbit");
-    viewer.setSelectionHighlightVisible(tool !== "hsv" && tool !== "colorize");
+    viewer.setSelectionHighlightVisible(tool !== "hsv" && tool !== "colorize" && tool !== "paintBrush");
     selectionControls.hidden = !isSelectionTool(tool);
+    paintControls.hidden = tool !== "paintBrush";
     hsvControls.hidden = tool !== "hsv";
     colorizeControls.hidden = tool !== "colorize";
+    hideControls.hidden = tool !== "hide";
     moveControls.hidden = tool !== "move";
-    visualizer.hidden = tool !== "brushSelect";
+    visualizer.hidden = tool !== "brushSelect" && tool !== "paintBrush";
 
     for (const [toolId, button] of toolButtons) {
       const active = toolId === tool;
@@ -311,8 +394,18 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     }
   }
 
+  function resetHsvInputs(): void {
+    hueInput.input.value = "0";
+    saturationInput.input.value = "100";
+    valueInput.input.value = "100";
+    hsvAdjust.hue = 0;
+    hsvAdjust.saturation = 1;
+    hsvAdjust.value = 1;
+  }
+
   function updateVisualizerSize(): void {
-    const diameter = selectionOptions.screenRadius * 2;
+    const radius = tool === "paintBrush" ? paintOptions.screenRadius : selectionOptions.screenRadius;
+    const diameter = radius * 2;
     visualizer.style.width = `${diameter}px`;
     visualizer.style.height = `${diameter}px`;
   }
@@ -323,6 +416,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   return {
     getTool: () => tool,
     getSelectionOptions: () => ({ ...selectionOptions }),
+    getPaintOptions: () => ({ ...paintOptions }),
     getHsvAdjust: () => ({ ...hsvAdjust }),
     setMoveActive: (active) => {
       moveActive = active;
@@ -371,6 +465,14 @@ function createToolButton(label: string, svg: string): HTMLButtonElement {
   return button;
 }
 
+function createActionButton(label: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = "tool-action-button";
+  button.type = "button";
+  button.textContent = label;
+  return button;
+}
+
 function createNumberInput(
   text: string,
   value: number,
@@ -383,7 +485,8 @@ function createNumberInput(
 
   label.className = "selection-control";
   label.textContent = text;
-  input.type = "number";
+  input.type = "range";
+  input.className = "tool-range";
   input.min = String(min);
   input.max = String(max);
   input.step = String(step);
@@ -511,6 +614,17 @@ function brushIconSvg(): string {
   `;
 }
 
+function paintBrushIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M15 4 5 14" />
+      <path d="m14 5 5 5" />
+      <path d="M4 15c3 0 5 2 5 5-2.7 0-5-2.2-5-5Z" />
+      <path d="M12 7 17 2l5 5-5 5" />
+    </svg>
+  `;
+}
+
 function marqueeIconSvg(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -543,6 +657,16 @@ function colorizeIconSvg(): string {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 3a7 7 0 0 0-7 7c0 5 7 11 7 11s7-6 7-11a7 7 0 0 0-7-7Z" />
       <path d="M9 10a3 3 0 0 0 6 0" />
+    </svg>
+  `;
+}
+
+function hideIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z" />
+      <path d="m4 4 16 16" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </svg>
   `;
 }

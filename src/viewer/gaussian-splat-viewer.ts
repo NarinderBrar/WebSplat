@@ -99,6 +99,7 @@ export default class GaussianSplatViewer {
     splatBuffer.createStableIdBuffers(gpu.device, world.getSplatData());
     splatBuffer.createChunkMetadataBuffer(gpu.device, world.packGpuMetadata());
     splatBuffer.createSelectionMaskBuffer(gpu.device);
+    splatBuffer.createHiddenMaskBuffer(gpu.device);
     splatBuffer.createIndirectArgsBuffer(gpu.device);
     splatBuffer.createChunkOrderCache(world.getChunks());
 
@@ -337,6 +338,34 @@ export default class GaussianSplatViewer {
     );
   }
 
+  paintBrushAt(
+    clientX: number,
+    clientY: number,
+    screenRadius: number,
+    color: [number, number, number],
+    mixFactor: number,
+  ): number {
+    const rect = this.gpu.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
+    const y = ((clientY - rect.top) / rect.height) * this.gpu.canvas.height;
+
+    return this.splatBuffer.paintScreenRadius(
+      this.gpu.device,
+      {
+        screenX: x,
+        screenY: y,
+        screenRadius: Math.max(1, screenRadius * (this.gpu.canvas.width / Math.max(1, rect.width))),
+        viewportWidth: this.gpu.canvas.width,
+        viewportHeight: this.gpu.canvas.height,
+        viewMatrix: this.camera.getViewMatrix(),
+        viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
+        color,
+        mixFactor,
+        chunks: this.world.getVisibility().chunks,
+      },
+    );
+  }
+
   beginHsvEdit(): number {
     return this.splatBuffer.beginHsvEdit();
   }
@@ -349,6 +378,10 @@ export default class GaussianSplatViewer {
     this.splatBuffer.commitHsvEdit();
   }
 
+  cancelHsvEdit(): void {
+    this.splatBuffer.cancelHsvEdit(this.gpu.device);
+  }
+
   beginColorizeEdit(): number {
     return this.splatBuffer.beginColorizeEdit();
   }
@@ -359,6 +392,18 @@ export default class GaussianSplatViewer {
 
   commitColorizeEdit(): void {
     this.splatBuffer.commitColorizeEdit();
+  }
+
+  cancelColorizeEdit(): void {
+    this.splatBuffer.cancelColorizeEdit(this.gpu.device);
+  }
+
+  hideSelectedSplats(): number {
+    return this.splatBuffer.hideSelectedSplats(this.gpu.device);
+  }
+
+  unhideAllSplats(): void {
+    this.splatBuffer.unhideAllSplats(this.gpu.device);
   }
 
   beginMoveSelected(): boolean {

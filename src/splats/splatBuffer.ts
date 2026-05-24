@@ -91,6 +91,19 @@ export interface ScreenLassoSelectionOptions {
   chunks?: readonly SplatChunk[];
 }
 
+export interface PaintBrushOptions {
+  screenX: number;
+  screenY: number;
+  screenRadius: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  viewMatrix: Float32Array;
+  viewProjectionMatrix: Float32Array;
+  color: [number, number, number];
+  mixFactor: number;
+  chunks?: readonly SplatChunk[];
+}
+
 const LOCAL_SORT_DIRECTION_EPSILON = 0.015;
 const COLOR_BIN_COUNT = 32;
 
@@ -137,6 +150,7 @@ export class SplatBuffer {
   private order: Uint32Array | null = null;
   private visibleSplatIndices: Uint32Array | null = null;
   private selectionMask: Uint32Array | null = null;
+  private hiddenMask: Uint32Array | null = null;
   private chunkLocalSortedIndices: Uint32Array | null = null;
   private splatChunkIds: Uint32Array | null = null;
   private chunksById = new Map<number, SplatChunk>();
@@ -158,10 +172,12 @@ export class SplatBuffer {
   private chunkMetadataBuffer: GPUBuffer | null = null;
   private chunkMetadataBufferSize = 0;
   private selectionMaskBuffer: GPUBuffer | null = null;
+  private hiddenMaskBuffer: GPUBuffer | null = null;
   private indirectArgsBuffer: GPUBuffer | null = null;
   private ownsVisibleSplatIndicesBuffer = true;
   private ownsIndirectArgsBuffer = true;
   private selectionGeneration = 0;
+  private selectedSplatCount = 0;
   private selectionHighlightVisible = true;
   private hiddenSelectionMask: Uint32Array | null = null;
   private hsvEditOriginalColors: Float32Array | null = null;
@@ -182,6 +198,8 @@ export class SplatBuffer {
     this.order = new Uint32Array(this.count);
     this.visibleSplatIndices = new Uint32Array(this.count);
     this.selectionMask = new Uint32Array(this.count);
+    this.hiddenMask = new Uint32Array(this.count);
+    this.selectedSplatCount = 0;
     this.depths = new Float32Array(this.count);
 
     for (let i = 0; i < this.count; i++) {
@@ -241,12 +259,24 @@ export class SplatBuffer {
   public createSelectionMaskBuffer(device: GPUDevice): void {
     this.selectionMaskBuffer?.destroy();
     this.selectionMask = new Uint32Array(this.count);
+    this.selectedSplatCount = 0;
     this.selectionMaskBuffer = device.createBuffer({
       label: "SelectionMask",
       size: Math.max(4, this.count * Uint32Array.BYTES_PER_ELEMENT),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.uploadSelectionMask(device);
+  }
+
+  public createHiddenMaskBuffer(device: GPUDevice): void {
+    this.hiddenMaskBuffer?.destroy();
+    this.hiddenMask = new Uint32Array(this.count);
+    this.hiddenMaskBuffer = device.createBuffer({
+      label: "HiddenMask",
+      size: Math.max(4, this.count * Uint32Array.BYTES_PER_ELEMENT),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.uploadHiddenMask(device);
   }
 
   public createIndirectArgsBuffer(device: GPUDevice): void {
@@ -341,6 +371,10 @@ export class SplatBuffer {
 
   public getSelectionMaskBuffer(): GPUBuffer | null {
     return this.selectionMaskBuffer;
+  }
+
+  public getHiddenMaskBuffer(): GPUBuffer | null {
+    return this.hiddenMaskBuffer;
   }
 
   public getIndirectArgsBuffer(): GPUBuffer | null {
@@ -499,6 +533,10 @@ export class SplatBuffer {
       for (let i = sourceStart; i < sourceEnd; i += plan.lodStep) {
         const splatIndex = this.chunkLocalSortedIndices[i];
 
+        if (this.isSplatHidden(splatIndex)) {
+          continue;
+        }
+
         const useTileBudget = tileState && shouldApplyTileBudget(plan, tileState.options);
 
         if (tileState && !useTileBudget) {
@@ -550,6 +588,10 @@ export class SplatBuffer {
 
   public setGpuRenderCountEstimate(renderCount: number): void {
     this.renderCount = Math.max(0, Math.min(this.count, renderCount));
+  }
+
+  public isSplatHidden(splatIndex: number): boolean {
+    return (this.hiddenMask?.[splatIndex] ?? 0) !== 0;
   }
 
   public selectConnectedSimilarColor(
@@ -725,18 +767,76 @@ export class SplatBuffer {
     });
   }
 
-  public getSelectedCount(): number {
-    if (!this.selectionMask) {
+  public paintScreenRadius(device: GPUDevice, options: PaintBrushOptions): number {
+    if (!this.positions || !this.colors) {
       return 0;
     }
 
-    let count = 0;
-    for (let i = 0; i < this.selectionMask.length; i++) {
-      if (this.selectionMask[i] !== 0) {
-        count++;
+    const chunks = options.chunks ?? [...this.chunksById.values()];
+    const radiusSq = options.screenRadius * options.screenRadius;
+    const mix = Math.max(0, Math.min(1, options.mixFactor));
+    const selectionOnly = this.selectedSplatCount > 0;
+    const [paintH, paintS] = rgbToHsv(options.color[0], options.color[1], options.color[2]);
+    let paintedCount = 0;
+
+    if (mix <= 0) {
+      return 0;
+    }
+
+    for (const chunk of chunks) {
+      const end = chunk.splatStart + chunk.splatCount;
+
+      for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+        if (this.isSplatHidden(splatIndex)) {
+          continue;
+        }
+
+        if (selectionOnly && this.selectionMask?.[splatIndex] === 0) {
+          continue;
+        }
+
+        const projected = this.projectSplatToScreen(splatIndex, options);
+
+        if (!projected) {
+          continue;
+        }
+
+        const dx = projected.x - options.screenX;
+        const dy = projected.y - options.screenY;
+        const distanceSq = dx * dx + dy * dy;
+
+        if (distanceSq > radiusSq) {
+          continue;
+        }
+
+        const falloff = Math.max(0, 1 - Math.sqrt(distanceSq) / Math.max(1, options.screenRadius));
+        const strength = mix * falloff;
+        const base = splatIndex * 3;
+        const [sourceH, sourceS, sourceV] = rgbToHsv(
+          this.colors[base],
+          this.colors[base + 1],
+          this.colors[base + 2],
+        );
+        const hueDelta = shortestHueDelta(sourceH, paintH);
+        const nextH = wrap01(sourceH + hueDelta * strength);
+        const nextS = clamp01(sourceS + (paintS - sourceS) * strength);
+        const [r, g, b] = hsvToRgb(nextH, nextS, sourceV);
+        this.colors[base] = r;
+        this.colors[base + 1] = g;
+        this.colors[base + 2] = b;
+        paintedCount++;
       }
     }
-    return count;
+
+    if (paintedCount > 0) {
+      this.uploadColors(device);
+    }
+
+    return paintedCount;
+  }
+
+  public getSelectedCount(): number {
+    return this.selectedSplatCount;
   }
 
   public getSelectedCentroid(): Vector3Tuple | null {
@@ -818,6 +918,26 @@ export class SplatBuffer {
     this.rebuildSelectionIndices();
   }
 
+  public cancelHsvEdit(device: GPUDevice): void {
+    if (!this.colors || !this.hsvEditIndices || !this.hsvEditOriginalColors) {
+      this.hsvEditIndices = null;
+      this.hsvEditOriginalColors = null;
+      return;
+    }
+
+    for (let i = 0; i < this.hsvEditIndices.length; i++) {
+      const sourceBase = i * 3;
+      const targetBase = this.hsvEditIndices[i] * 3;
+      this.colors[targetBase] = this.hsvEditOriginalColors[sourceBase];
+      this.colors[targetBase + 1] = this.hsvEditOriginalColors[sourceBase + 1];
+      this.colors[targetBase + 2] = this.hsvEditOriginalColors[sourceBase + 2];
+    }
+
+    this.hsvEditIndices = null;
+    this.hsvEditOriginalColors = null;
+    this.uploadColors(device);
+  }
+
   public beginColorizeEdit(): number {
     if (!this.colors || !this.selectionMask) {
       this.colorizeEditOriginalColors = null;
@@ -868,6 +988,26 @@ export class SplatBuffer {
     this.colorizeEditIndices = null;
     this.colorizeEditOriginalColors = null;
     this.rebuildSelectionIndices();
+  }
+
+  public cancelColorizeEdit(device: GPUDevice): void {
+    if (!this.colors || !this.colorizeEditIndices || !this.colorizeEditOriginalColors) {
+      this.colorizeEditIndices = null;
+      this.colorizeEditOriginalColors = null;
+      return;
+    }
+
+    for (let i = 0; i < this.colorizeEditIndices.length; i++) {
+      const sourceBase = i * 3;
+      const targetBase = this.colorizeEditIndices[i] * 3;
+      this.colors[targetBase] = this.colorizeEditOriginalColors[sourceBase];
+      this.colors[targetBase + 1] = this.colorizeEditOriginalColors[sourceBase + 1];
+      this.colors[targetBase + 2] = this.colorizeEditOriginalColors[sourceBase + 2];
+    }
+
+    this.colorizeEditIndices = null;
+    this.colorizeEditOriginalColors = null;
+    this.uploadColors(device);
   }
 
   public beginMoveEdit(): Vector3Tuple | null {
@@ -927,6 +1067,7 @@ export class SplatBuffer {
 
     this.selectionGeneration++;
     this.selectionMask.fill(0);
+    this.selectedSplatCount = 0;
     this.uploadSelectionMask(device);
   }
 
@@ -937,6 +1078,35 @@ export class SplatBuffer {
 
     this.selectionHighlightVisible = visible;
     this.uploadSelectionMask(device);
+  }
+
+  public hideSelectedSplats(device: GPUDevice): number {
+    if (!this.selectionMask || !this.hiddenMask) {
+      return 0;
+    }
+
+    let hiddenCount = 0;
+
+    for (let i = 0; i < this.count; i++) {
+      if (this.selectionMask[i] === 0 || this.hiddenMask[i] !== 0) {
+        continue;
+      }
+
+      this.hiddenMask[i] = 1;
+      hiddenCount++;
+    }
+
+    this.uploadHiddenMask(device);
+    return hiddenCount;
+  }
+
+  public unhideAllSplats(device: GPUDevice): void {
+    if (!this.hiddenMask) {
+      return;
+    }
+
+    this.hiddenMask.fill(0);
+    this.uploadHiddenMask(device);
   }
 
   public dispose(): void {
@@ -954,6 +1124,7 @@ export class SplatBuffer {
     this.localIndexBuffer?.destroy();
     this.chunkMetadataBuffer?.destroy();
     this.selectionMaskBuffer?.destroy();
+    this.hiddenMaskBuffer?.destroy();
     if (this.ownsIndirectArgsBuffer) {
       this.indirectArgsBuffer?.destroy();
     }
@@ -970,6 +1141,7 @@ export class SplatBuffer {
     this.chunkMetadataBuffer = null;
     this.chunkMetadataBufferSize = 0;
     this.selectionMaskBuffer = null;
+    this.hiddenMaskBuffer = null;
     this.indirectArgsBuffer = null;
     this.ownsVisibleSplatIndicesBuffer = true;
     this.ownsIndirectArgsBuffer = true;
@@ -982,6 +1154,8 @@ export class SplatBuffer {
     this.visibleSplatIndices = null;
     this.selectionMask = null;
     this.hiddenSelectionMask = null;
+    this.hiddenMask = null;
+    this.selectedSplatCount = 0;
     this.chunkLocalSortedIndices = null;
     this.splatChunkIds = null;
     this.chunksById.clear();
@@ -1092,6 +1266,20 @@ export class SplatBuffer {
     );
   }
 
+  private uploadHiddenMask(device: GPUDevice): void {
+    if (!this.hiddenMask || !this.hiddenMaskBuffer) {
+      return;
+    }
+
+    device.queue.writeBuffer(
+      this.hiddenMaskBuffer,
+      0,
+      this.hiddenMask.buffer as ArrayBuffer,
+      this.hiddenMask.byteOffset,
+      this.hiddenMask.byteLength,
+    );
+  }
+
   private uploadColors(device: GPUDevice): void {
     if (!this.colors || !this.colorBuffer) {
       return;
@@ -1123,6 +1311,7 @@ export class SplatBuffer {
   private prepareSelectionMode(selectionMode: SelectionMode): void {
     if (selectionMode === "normal") {
       this.selectionMask?.fill(0);
+      this.selectedSplatCount = 0;
     }
   }
 
@@ -1134,11 +1323,17 @@ export class SplatBuffer {
     if (selectionMode === "subtractive") {
       const changed = this.selectionMask[splatIndex] !== 0;
       this.selectionMask[splatIndex] = 0;
+      if (changed) {
+        this.selectedSplatCount = Math.max(0, this.selectedSplatCount - 1);
+      }
       return changed;
     }
 
     const changed = this.selectionMask[splatIndex] === 0;
     this.selectionMask[splatIndex] = 1;
+    if (changed) {
+      this.selectedSplatCount++;
+    }
     return changed;
   }
 
@@ -1242,6 +1437,10 @@ export class SplatBuffer {
       const end = chunk.splatStart + chunk.splatCount;
 
       for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+        if (this.isSplatHidden(splatIndex)) {
+          continue;
+        }
+
         const projected = this.projectSplatToScreen(splatIndex, options);
 
         if (projected && options.contains(projected) && this.applySelectionCandidate(splatIndex, options.selectionMode)) {
@@ -1327,6 +1526,10 @@ export class SplatBuffer {
       const end = chunk.splatStart + chunk.splatCount;
 
       for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+        if (this.isSplatHidden(splatIndex)) {
+          continue;
+        }
+
       const base = splatIndex * 3;
       const x = this.positions[base];
       const y = this.positions[base + 1];
@@ -1514,6 +1717,10 @@ export class SplatBuffer {
     }
 
     const seedBase = seedGlobalIndex * 3;
+    if (this.isSplatHidden(seedGlobalIndex)) {
+      return 0;
+    }
+
     const seedR = this.colors[seedBase];
     const seedG = this.colors[seedBase + 1];
     const seedB = this.colors[seedBase + 2];
@@ -1550,6 +1757,10 @@ export class SplatBuffer {
     }
 
     const seedBase = seedGlobalIndex * 3;
+    if (this.isSplatHidden(seedGlobalIndex)) {
+      return 0;
+    }
+
     const seedR = this.colors[seedBase];
     const seedG = this.colors[seedBase + 1];
     const seedB = this.colors[seedBase + 2];
@@ -1590,6 +1801,10 @@ export class SplatBuffer {
     const end = chunk.splatStart + chunk.splatCount;
 
     for (let splatIndex = chunk.splatStart; splatIndex < end; splatIndex++) {
+      if (this.isSplatHidden(splatIndex)) {
+        continue;
+      }
+
       const spatialKey = this.selectionCellKey(splatIndex, spatialCellSize);
       const spatialBucket = spatialBuckets.get(spatialKey);
 
@@ -1659,6 +1874,10 @@ export class SplatBuffer {
       );
 
       for (const i of sourceIndices) {
+        if (this.isSplatHidden(i)) {
+          continue;
+        }
+
         const base = i * 3;
         const dr = this.colors[base] - seedR;
         const dg = this.colors[base + 1] - seedG;
@@ -2081,6 +2300,18 @@ function clamp01(value: number): number {
 
 function wrap01(value: number): number {
   return ((value % 1) + 1) % 1;
+}
+
+function shortestHueDelta(from: number, to: number): number {
+  let delta = wrap01(to) - wrap01(from);
+
+  if (delta > 0.5) {
+    delta -= 1;
+  } else if (delta < -0.5) {
+    delta += 1;
+  }
+
+  return delta;
 }
 
 function nextAnimationFrame(): Promise<void> {
