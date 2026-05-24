@@ -53,6 +53,7 @@ export default class GaussianSplatViewer {
   private transformStartRotation: Quaternion | null = null;
   private transformStartScaling: Vector3 | null = null;
   private moveActive = false;
+  private densityCullingEnabled = false;
 
   private constructor(
     gpu: GpuContext,
@@ -228,6 +229,10 @@ export default class GaussianSplatViewer {
 
   setVisualizationMode(mode: number): void {
     this.renderer.setVisualizationMode(mode);
+  }
+
+  setDensityCulling(enabled: boolean): void {
+    this.densityCullingEnabled = enabled;
   }
 
   getWorld(): SplatWorld {
@@ -583,6 +588,23 @@ export default class GaussianSplatViewer {
         this.qualityMode,
         this.lastFrameMs,
       );
+
+      if (this.densityCullingEnabled) {
+        const DENSITY_THRESHOLD = 500;
+        for (const plan of plans) {
+          const chunk = this.world.getChunkById(plan.chunkId);
+          if (!chunk) continue;
+          const dx = chunk.boundsMax[0] - chunk.boundsMin[0];
+          const dy = chunk.boundsMax[1] - chunk.boundsMin[1];
+          const dz = chunk.boundsMax[2] - chunk.boundsMin[2];
+          const volume = Math.max(1e-8, dx * dy * dz);
+          const density = chunk.localSortedIndicesCount / volume;
+          if (density > DENSITY_THRESHOLD) {
+            plan.lodStep = Math.max(plan.lodStep, 4);
+          }
+        }
+      }
+
       const visibleTelemetry = this.splatBuffer.buildVisibleSplatIndicesFromChunkPlans(
         plans,
         this.camera.getViewMatrix(),

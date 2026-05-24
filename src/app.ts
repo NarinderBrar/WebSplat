@@ -290,7 +290,18 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     toolbar.append(button);
   }
 
-
+  const densityToggle = document.createElement("button");
+  densityToggle.className = "tool-mode-button";
+  densityToggle.title = "Density culling: show 30% splats in dense areas";
+  densityToggle.setAttribute("aria-label", "Density culling");
+  densityToggle.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>`;
+  let densityCullingActive = false;
+  densityToggle.addEventListener("click", () => {
+    densityCullingActive = !densityCullingActive;
+    densityToggle.classList.toggle("is-active", densityCullingActive);
+    viewer.setDensityCulling(densityCullingActive);
+  });
+  toolbar.append(densityToggle);
 
   selectionControls.append(modeControl, thresholdInput.label, radiusInput.label, selectBehindToggle, depthRangeInput.label);
 

@@ -540,11 +540,6 @@ export class SplatBuffer {
 
       for (let i = sourceStart; i < sourceEnd; i += plan.lodStep) {
         const splatIndex = this.chunkLocalSortedIndices[i];
-
-        if (this.isSplatHidden(splatIndex)) {
-          continue;
-        }
-
         const useTileBudget = tileState && shouldApplyTileBudget(plan, tileState.options);
 
         if (tileState && !useTileBudget) {
@@ -1197,6 +1192,38 @@ export class SplatBuffer {
     this.uploadSelectionMask(device);
   }
 
+  private compactSortedIndices(): void {
+    if (!this.chunkLocalSortedIndices || !this.hiddenMask) {
+      return;
+    }
+
+    for (const [, chunk] of this.chunksById) {
+      const oldStart = chunk.localSortedIndicesOffset;
+      const oldCount = chunk.localSortedIndicesCount;
+      const oldEnd = oldStart + oldCount;
+      let write = oldStart;
+
+      for (let i = oldStart; i < oldEnd; i++) {
+        const splatIndex = this.chunkLocalSortedIndices[i];
+
+        if (this.hiddenMask[splatIndex] !== 0) {
+          continue;
+        }
+
+        this.chunkLocalSortedIndices[write] = splatIndex;
+        write++;
+      }
+
+      const newCount = write - oldStart;
+
+      if (newCount !== oldCount) {
+        chunk.localSortedIndicesCount = newCount;
+        chunk.lastSortDirection = null;
+        chunk.localOrderCacheVersion++;
+      }
+    }
+  }
+
   public hideSelectedSplats(device: GPUDevice): number {
     if (!this.selectionMask || !this.hiddenMask) {
       return 0;
@@ -1214,6 +1241,7 @@ export class SplatBuffer {
     }
 
     this.uploadHiddenMask(device);
+    this.compactSortedIndices();
     return hiddenCount;
   }
 
@@ -1224,6 +1252,7 @@ export class SplatBuffer {
 
     this.hiddenMask.fill(0);
     this.uploadHiddenMask(device);
+    this.compactSortedIndices();
   }
 
   public dispose(): void {
