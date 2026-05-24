@@ -2,6 +2,7 @@ export type EditorTool =
   | "orbit"
   | "brushSelect"
   | "paintBrush"
+  | "circleSelect"
   | "marqueeSelect"
   | "lassoSelect"
   | "hsv"
@@ -9,7 +10,8 @@ export type EditorTool =
   | "hide"
   | "move"
   | "rotate"
-  | "scale";
+  | "scale"
+  | "copy";
 
 export type SelectionMode = "normal" | "additive" | "subtractive";
 

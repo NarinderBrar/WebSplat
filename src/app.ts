@@ -6,6 +6,8 @@ interface SelectionToolOptions {
   colorThreshold: number;
   screenRadius: number;
   selectionMode: SelectionMode;
+  selectBehind: boolean;
+  depthRangeFactor: number;
 }
 
 interface PaintBrushOptions {
@@ -40,6 +42,7 @@ async function main(): Promise<void> {
       optimized,
     });
     viewer.start();
+    viewer.setVisualizationMode(1);
     const editorState = createEditorToolbar(renderCanvas, viewer);
     bindEditorTools(renderCanvas, viewer, editorState);
   } catch (error) {
@@ -63,6 +66,7 @@ function bindEditorTools(
   let pointerDownY = 0;
   let pointerDownButton = -1;
   let isPaintDragging = false;
+  let isBrushDragging = false;
   let dragOverlay: HTMLDivElement | null = null;
   let lassoOverlay: SVGSVGElement | null = null;
   let lassoPath: SVGPolylineElement | null = null;
@@ -88,6 +92,8 @@ function bindEditorTools(
       lassoOverlay = overlay.svg;
       lassoPath = overlay.path;
       updateLassoPath(lassoPath, lassoPoints);
+    } else if (tool === "brushSelect") {
+      isBrushDragging = false;
     } else if (tool === "paintBrush") {
       isPaintDragging = true;
       paintAt(event);
@@ -112,6 +118,17 @@ function bindEditorTools(
         lassoPoints.push({ x: event.clientX, y: event.clientY });
         updateLassoPath(lassoPath, lassoPoints);
       }
+    } else if (tool === "brushSelect") {
+      isBrushDragging = true;
+      const options = editorState.getSelectionOptions();
+      void viewer.selectSimilarColorDragAt(
+        event.clientX,
+        event.clientY,
+        options.colorThreshold,
+        options.selectionMode,
+        options.selectBehind,
+        options.depthRangeFactor,
+      );
     } else if (tool === "paintBrush" && isPaintDragging) {
       paintAt(event);
     }
@@ -125,18 +142,29 @@ function bindEditorTools(
 
     pointerDownButton = -1;
     isPaintDragging = false;
+    const wasBrushDragging = isBrushDragging;
+    isBrushDragging = false;
     const tool = editorState.getTool();
     const dx = event.clientX - pointerDownX;
     const dy = event.clientY - pointerDownY;
     const movedSq = dx * dx + dy * dy;
 
-    if (tool === "brushSelect" && movedSq <= 16) {
+    if (tool === "brushSelect" && movedSq <= 16 && !wasBrushDragging) {
       const options = editorState.getSelectionOptions();
-      void viewer.selectBrushAt(
+      void viewer.selectSimilarColorAt(
+        event.clientX,
+        event.clientY,
+        options.colorThreshold,
+        options.selectionMode,
+        options.selectBehind,
+        options.depthRangeFactor,
+      );
+    } else if (tool === "circleSelect" && movedSq <= 16) {
+      const options = editorState.getSelectionOptions();
+      void viewer.selectCircleAt(
         event.clientX,
         event.clientY,
         options.screenRadius,
-        options.colorThreshold,
         options.selectionMode,
       );
     } else if (tool === "marqueeSelect" && dragOverlay && movedSq > 16) {
@@ -181,6 +209,8 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     colorThreshold: 0.14,
     screenRadius: 12,
     selectionMode: "normal",
+    selectBehind: true,
+    depthRangeFactor: 2.5,
   };
   const paintOptions: PaintBrushOptions = {
     color: [0.85, 0.15, 0.15],
@@ -204,6 +234,8 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   const thresholdInput = createNumberInput("Threshold", selectionOptions.colorThreshold, 0.01, 1, 0.01);
   const radiusInput = createNumberInput("Radius", selectionOptions.screenRadius, 1, 96, 1);
   const modeControl = createSelectionModeControl(selectionOptions);
+  const depthRangeInput = createNumberInput("Depth range", selectionOptions.depthRangeFactor, 1.0, 10, 0.1);
+  const selectBehindToggle = createSelectBehindToggle(selectionOptions, depthRangeInput.label);
   const paintColorInput = createColorInput("Paint", "#d92626");
   const paintMixInput = createRangeInput("Mix", 35, 1, 100, 1);
   const paintRadiusInput = createNumberInput("Radius", paintOptions.screenRadius, 1, 128, 1);
@@ -236,6 +268,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     ["orbit", "Orbit", orbitIconSvg()],
     ["brushSelect", "Brush select", brushIconSvg()],
     ["paintBrush", "Paint brush", paintBrushIconSvg()],
+    ["circleSelect", "Circle select", circleIconSvg()],
     ["marqueeSelect", "Marquee select", marqueeIconSvg()],
     ["lassoSelect", "Lasso select", lassoIconSvg()],
     ["hsv", "HSV", hsvIconSvg()],
@@ -244,23 +277,56 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     ["move", "Move", moveIconSvg()],
     ["rotate", "Rotate", rotateIconSvg()],
     ["scale", "Scale", scaleIconSvg()],
+    ["copy", "Copy selected", copyIconSvg()],
   ];
 
   for (const [toolId, label, icon] of tools) {
     const button = createToolButton(label, icon);
-    button.addEventListener("click", () => setTool(toolId));
+    const handler = toolId === "copy"
+      ? () => { const count = viewer.duplicateSelectedSplats(); if (count > 0) setTool("orbit"); }
+      : () => setTool(toolId);
+    button.addEventListener("click", handler);
     toolButtons.set(toolId, button);
     toolbar.append(button);
   }
 
-  selectionControls.append(modeControl, thresholdInput.label, radiusInput.label);
+
+
+  selectionControls.append(modeControl, thresholdInput.label, radiusInput.label, selectBehindToggle, depthRangeInput.label);
+
+  depthRangeInput.input.addEventListener("input", () => {
+    selectionOptions.depthRangeFactor = depthRangeInput.input.valueAsNumber || 2.5;
+  });
   paintControls.append(paintColorInput.label, paintMixInput.label, paintRadiusInput.label);
   hsvControls.append(hueInput.label, saturationInput.label, valueInput.label, hsvApplyButton, hsvCancelButton);
   colorizeControls.append(colorizeInput.label, colorizeApplyButton, colorizeCancelButton);
   hideControls.append(hideSelectedButton, unhideAllButton);
   transformControls.append(transformHint);
   optionsBar.append(selectionControls, paintControls, hsvControls, colorizeControls, hideControls, transformControls);
-  document.body.append(toolbar, optionsBar, visualizer);
+  const vizBar = document.createElement("div");
+  vizBar.className = "viz-bar";
+  const vizModes: Array<{ mode: number; label: string; svg: string }> = [
+    { mode: 0, label: "Normal", svg: `<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" fill="currentColor" stroke="none"/></svg>` },
+    { mode: 1, label: "Particle cloud", svg: `<svg viewBox="0 0 16 16"><circle cx="5" cy="8" r="2.2" fill="currentColor" stroke="none"/><circle cx="11" cy="6" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="11" r="1.8" fill="currentColor" stroke="none"/></svg>` },
+    { mode: 2, label: "Random colors", svg: `<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor"/><path d="M5 6h6M5 8h6M5 10h6" stroke="currentColor" stroke-width="1.2"/></svg>` },
+  ];
+  let activeVizMode = 1;
+  for (const viz of vizModes) {
+    const btn = document.createElement("button");
+    btn.className = "viz-button" + (viz.mode === activeVizMode ? " is-active" : "");
+    btn.title = viz.label;
+    btn.setAttribute("aria-label", viz.label);
+    btn.innerHTML = viz.svg;
+    btn.addEventListener("click", () => {
+      activeVizMode = viz.mode;
+      viewer.setVisualizationMode(viz.mode);
+      for (const child of vizBar.children) {
+        (child as HTMLElement).classList.toggle("is-active", child === btn);
+      }
+    });
+    vizBar.append(btn);
+  }
+  document.body.append(toolbar, optionsBar, visualizer, vizBar);
 
   thresholdInput.input.addEventListener("input", () => {
     selectionOptions.colorThreshold = thresholdInput.input.valueAsNumber || 0.14;
@@ -343,7 +409,7 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (tool !== "brushSelect" && tool !== "paintBrush") {
+    if (tool !== "circleSelect" && tool !== "paintBrush") {
       return;
     }
 
@@ -375,12 +441,16 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
     viewer.setOrbitControlsEnabled(tool === "orbit");
     viewer.setSelectionHighlightVisible(tool !== "hsv" && tool !== "colorize" && tool !== "paintBrush");
     selectionControls.hidden = !isSelectionTool(tool);
+    thresholdInput.label.hidden = tool !== "brushSelect";
+    selectBehindToggle.hidden = tool !== "brushSelect";
+    depthRangeInput.label.hidden = tool !== "brushSelect" || selectionOptions.selectBehind;
+    radiusInput.label.hidden = tool !== "circleSelect";
     paintControls.hidden = tool !== "paintBrush";
     hsvControls.hidden = tool !== "hsv";
     colorizeControls.hidden = tool !== "colorize";
     hideControls.hidden = tool !== "hide";
     transformControls.hidden = !isTransformTool(tool);
-    visualizer.hidden = tool !== "brushSelect" && tool !== "paintBrush";
+    visualizer.hidden = tool !== "circleSelect" && tool !== "paintBrush";
 
     for (const [toolId, button] of toolButtons) {
       const active = toolId === tool;
@@ -431,11 +501,31 @@ function createEditorToolbar(canvas: HTMLCanvasElement, viewer: GaussianSplatVie
 }
 
 function isSelectionTool(tool: EditorTool): boolean {
-  return tool === "brushSelect" || tool === "marqueeSelect" || tool === "lassoSelect";
+  return tool === "brushSelect" || tool === "circleSelect" || tool === "marqueeSelect" || tool === "lassoSelect";
 }
 
 function isTransformTool(tool: EditorTool): tool is "move" | "rotate" | "scale" {
   return tool === "move" || tool === "rotate" || tool === "scale";
+}
+
+function createSelectBehindToggle(
+  options: SelectionToolOptions,
+  depthRangeLabel?: HTMLLabelElement,
+): HTMLLabelElement {
+  const label = document.createElement("label");
+  label.className = "selection-control";
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = options.selectBehind;
+  checkbox.addEventListener("change", () => {
+    options.selectBehind = checkbox.checked;
+    if (depthRangeLabel) {
+      depthRangeLabel.hidden = checkbox.checked;
+    }
+  });
+  label.append(checkbox, " Behind");
+  return label;
 }
 
 function createSelectionModeControl(options: SelectionToolOptions): HTMLDivElement {
@@ -635,6 +725,15 @@ function paintBrushIconSvg(): string {
   `;
 }
 
+function circleIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  `;
+}
+
 function marqueeIconSvg(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -718,6 +817,15 @@ function scaleIconSvg(): string {
       <path d="M14 4h6v6" />
       <path d="M10 20H4v-6" />
       <path d="M7 7h10v10H7z" />
+    </svg>
+  `;
+}
+
+function copyIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="5" y="5" width="13" height="13" rx="1" />
+      <path d="M17 7h2a1 1 0 0 1 1 1v11a2 2 0 0 1-2 2H7a1 1 0 0 1-1-1v-2" />
     </svg>
   `;
 }

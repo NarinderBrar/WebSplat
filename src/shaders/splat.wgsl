@@ -20,6 +20,7 @@ struct VertexOutput {
 @group(1) @binding(4) var<storage, read>    visibleSplatIndices: array<u32>;
 @group(1) @binding(5) var<storage, read>    selectionMask: array<u32>;
 @group(1) @binding(6) var<uniform>          renderSettings: vec4<f32>;
+@group(1) @binding(7) var<storage, read>    splatChunkIds:   array<u32>;
 
 const EXP4 = exp(-4.0);
 const INV_EXP4 = 1.0 / (1.0 - EXP4);
@@ -159,9 +160,14 @@ fn vsMain(
     return discarded;
   }
 
-  let cov2d = project_covariance_2d(worldCenter, covariance);
-
-  let ndcOffset = ellipse_offset(cov2d, corner) * renderSettings.x;
+  let vizMode = renderSettings.w;
+  var ndcOffset: vec2<f32>;
+  if (vizMode >= 1.0) {
+    ndcOffset = corner * 0.002;
+  } else {
+    let cov2d = project_covariance_2d(worldCenter, covariance);
+    ndcOffset = ellipse_offset(cov2d, corner) * renderSettings.x;
+  }
 
   var output: VertexOutput;
   output.position = vec4<f32>(
@@ -176,9 +182,24 @@ fn vsMain(
     splatColors[base3 + 2u],
   );
   let selected = selectionMask[splatIndex] != 0u;
-  output.color = select(baseColor, mix(baseColor, vec3<f32>(0.55, 0.82, 1.0), 0.32), selected);
+  var vizColor: vec3<f32>;
+  if (vizMode == 1.0) {
+    vizColor = baseColor;
+  } else if (vizMode == 2.0) {
+    let chunkId = f32(splatChunkIds[splatIndex]);
+    let rng = vec3<f32>(
+      fract(sin(chunkId * 12.9898 + 1.0) * 43758.5453),
+      fract(sin(chunkId * 78.233  + 2.0) * 43758.5453),
+      fract(sin(chunkId * 45.164  + 3.0) * 43758.5453),
+    );
+    vizColor = rng;
+  } else {
+    vizColor = baseColor;
+  }
+  let highlightMix = select(0.5, 0.85, vizMode >= 1.0);
+  output.color = select(vizColor, mix(vizColor, vec3<f32>(0.3, 1.0, 0.4), highlightMix), selected);
   output.localPos = corner;
-  output.opacity  = clamp(splatOpacities[splatIndex], 0.0, 1.0);
+  output.opacity  = select(clamp(splatOpacities[splatIndex], 0.0, 1.0), 1.0, vizMode == 1.0);
 
   return output;
 }

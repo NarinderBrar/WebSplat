@@ -29,7 +29,7 @@ export default class GaussianSplatViewer {
   private readonly renderer: GaussianRenderer;
   private readonly camera: OrbitCamera;
   private readonly splatBuffer: SplatBuffer;
-  private readonly world: SplatWorld;
+  private world: SplatWorld;
   private readonly gpuChunkCullPass: GpuChunkCullPass;
   private readonly gpuDepthBinPass: GpuDepthBinPass | null;
   private readonly gpuTilePressurePass: GpuTilePressurePass | null;
@@ -226,6 +226,10 @@ export default class GaussianSplatViewer {
     return this.camera.getBabylonScene();
   }
 
+  setVisualizationMode(mode: number): void {
+    this.renderer.setVisualizationMode(mode);
+  }
+
   getWorld(): SplatWorld {
     return this.world;
   }
@@ -259,7 +263,14 @@ export default class GaussianSplatViewer {
     return this.idPickingPass.readCopiedSplatId();
   }
 
-  async selectSimilarColorAt(clientX: number, clientY: number): Promise<number> {
+  async selectSimilarColorAt(
+    clientX: number,
+    clientY: number,
+    colorThreshold: number,
+    selectionMode: SelectionMode = "normal",
+    selectBehind: boolean = true,
+    depthRangeFactor: number = 2.5,
+  ): Promise<number> {
     const splatId = await this.pickSplatAt(clientX, clientY);
 
     if (splatId === null) {
@@ -274,28 +285,86 @@ export default class GaussianSplatViewer {
       return 0;
     }
 
-    return this.splatBuffer.selectConnectedSimilarColor(
+    return this.splatBuffer.selectConnectedSimilarColorProgressive(
       this.gpu.device,
       picked.globalIndex,
       picked.chunk,
       this.world,
+      {
+        colorThreshold,
+        selectBehind,
+        depthRangeFactor: selectBehind ? undefined : depthRangeFactor,
+        viewProjectionMatrix: selectBehind ? undefined : this.camera.getViewProjectionMatrix(),
+        viewportWidth: selectBehind ? undefined : this.gpu.canvas.width,
+        viewportHeight: selectBehind ? undefined : this.gpu.canvas.height,
+        visibleChunks: selectBehind ? undefined : this.world.getVisibility().chunks,
+      },
+      selectionMode,
     );
   }
 
-  async selectSimilarColorInRadiusAt(
+  async selectSimilarColorDragAt(
+    clientX: number,
+    clientY: number,
+    colorThreshold: number,
+    selectionMode: SelectionMode = "normal",
+    selectBehind: boolean = true,
+    depthRangeFactor: number = 2.5,
+  ): Promise<number> {
+    const rect = this.gpu.canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
+    const y = ((clientY - rect.top) / rect.height) * this.gpu.canvas.height;
+    const chunks = this.world.getVisibility().chunks;
+
+    const splatIndex = this.splatBuffer.findNearestSplatAtScreenPos(
+      x,
+      y,
+      this.gpu.canvas.width,
+      this.gpu.canvas.height,
+      this.camera.getViewProjectionMatrix(),
+      chunks,
+    );
+
+    if (splatIndex === null) {
+      return 0;
+    }
+
+    const chunk = this.splatBuffer.getChunkForSplatIndex(splatIndex);
+
+    if (!chunk) {
+      return 0;
+    }
+
+    return this.splatBuffer.selectConnectedSimilarColorProgressive(
+      this.gpu.device,
+      splatIndex,
+      chunk,
+      this.world,
+      {
+        colorThreshold,
+        selectBehind,
+        depthRangeFactor: selectBehind ? undefined : depthRangeFactor,
+        viewProjectionMatrix: selectBehind ? undefined : this.camera.getViewProjectionMatrix(),
+        viewportWidth: selectBehind ? undefined : this.gpu.canvas.width,
+        viewportHeight: selectBehind ? undefined : this.gpu.canvas.height,
+        visibleChunks: selectBehind ? undefined : this.world.getVisibility().chunks,
+      },
+      selectionMode,
+    );
+  }
+
+  async selectCircleAt(
     clientX: number,
     clientY: number,
     screenRadius: number,
-    colorThreshold: number,
     selectionMode: SelectionMode = "normal",
   ): Promise<number> {
     const rect = this.gpu.canvas.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * this.gpu.canvas.width;
     const y = ((clientY - rect.top) / rect.height) * this.gpu.canvas.height;
 
-    return this.splatBuffer.selectConnectedSimilarColorInScreenRadiusProgressive(
+    return this.splatBuffer.selectCircleProgressive(
       this.gpu.device,
-      this.world,
       {
         screenX: x,
         screenY: y,
@@ -304,20 +373,10 @@ export default class GaussianSplatViewer {
         viewportHeight: this.gpu.canvas.height,
         viewMatrix: this.camera.getViewMatrix(),
         viewProjectionMatrix: this.camera.getViewProjectionMatrix(),
-        colorThreshold,
+        colorThreshold: 0,
         selectionMode,
       },
     );
-  }
-
-  async selectBrushAt(
-    clientX: number,
-    clientY: number,
-    screenRadius: number,
-    colorThreshold: number,
-    selectionMode: SelectionMode,
-  ): Promise<number> {
-    return this.selectSimilarColorInRadiusAt(clientX, clientY, screenRadius, colorThreshold, selectionMode);
   }
 
   async selectMarquee(rect: ScreenRect, partial: boolean, selectionMode: SelectionMode): Promise<number> {
@@ -417,6 +476,29 @@ export default class GaussianSplatViewer {
 
   unhideAllSplats(): void {
     this.splatBuffer.unhideAllSplats(this.gpu.device);
+  }
+
+  duplicateSelectedSplats(): number {
+    const result = this.splatBuffer.prepareDuplicateData();
+
+    if (!result) {
+      return 0;
+    }
+
+    const newWorld = SplatWorld.fromSplatData(result.combined);
+    const worldData = newWorld.getSplatData();
+    this.splatBuffer.rebuildFromWorld(this.gpu.device, worldData, result.oldCount, result.oldHiddenMask);
+    this.splatBuffer.createChunkOrderCache(newWorld.getChunks());
+    this.splatBuffer.createChunkMetadataBuffer(this.gpu.device, newWorld.packGpuMetadata());
+    this.renderer.setSplatBuffer(this.splatBuffer);
+    this.idPickingPass.setSplatBuffer(this.splatBuffer);
+    this.world = newWorld;
+
+    if (this.moveActive) {
+      this.commitMoveSelected();
+    }
+
+    return worldData.count - result.oldCount;
   }
 
   beginMoveSelected(mode: "move" | "rotate" | "scale" = "move"): boolean {

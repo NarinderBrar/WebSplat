@@ -75,6 +75,11 @@ export default class RenderPipeline {
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "uniform" },
         },
+        {
+          binding: 7,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
       ],
     });
 
@@ -133,6 +138,7 @@ export default class RenderPipeline {
     const opacityBuffer = splatBuffer.getOpacityBuffer();
     const visibleSplatIndicesBuffer = splatBuffer.getVisibleSplatIndicesBuffer();
     const selectionMaskBuffer = splatBuffer.getSelectionMaskBuffer();
+    const chunkIdBuffer = splatBuffer.getChunkIdBuffer();
 
     if (!positionBuffer || !colorBuffer || !covarianceBuffer || !opacityBuffer || !visibleSplatIndicesBuffer || !selectionMaskBuffer) {
       throw new Error(
@@ -172,6 +178,10 @@ export default class RenderPipeline {
           binding: 6,
           resource: { buffer: this.renderSettingsBuffer },
         },
+        {
+          binding: 7,
+          resource: { buffer: chunkIdBuffer! },
+        },
       ],
     });
 
@@ -195,14 +205,28 @@ export default class RenderPipeline {
     this.gpuTilePressurePass = pass;
   }
 
+  private vizMode = 0;
+  private splatScale = 0.72;
+  private maxSplatVariance = 0.0035;
+  private quality = 0;
+
   setQualityLevel(quality: number): void {
-    const q = Math.max(0, Math.min(1, quality));
-    const splatScale = 0.72 + q * 0.95;
-    const maxSplatVariance = 0.0035 + q * 0.032;
+    this.quality = Math.max(0, Math.min(1, quality));
+    this.splatScale = 0.72 + this.quality * 0.95;
+    this.maxSplatVariance = 0.0035 + this.quality * 0.032;
+    this.flushRenderSettings();
+  }
+
+  setVisualizationMode(mode: number): void {
+    this.vizMode = mode;
+    this.flushRenderSettings();
+  }
+
+  private flushRenderSettings(): void {
     this.device.queue.writeBuffer(
       this.renderSettingsBuffer,
       0,
-      new Float32Array([splatScale, maxSplatVariance, q, 0]),
+      new Float32Array([this.splatScale, this.maxSplatVariance, this.quality, this.vizMode]),
     );
   }
 

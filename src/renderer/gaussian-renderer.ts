@@ -39,6 +39,10 @@ export class GaussianRenderer {
     this.pipeline.setQualityLevel(quality);
   }
 
+  public setVisualizationMode(mode: number): void {
+    this.pipeline.setVisualizationMode(mode);
+  }
+
   public render(cameraUniforms: CameraUniforms): void {
     this.gpu.resizeIfNeeded();
 

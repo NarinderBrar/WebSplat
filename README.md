@@ -9,14 +9,17 @@ The goal is to become a Photoshop-like editor for splats: open a scene, inspect 
 - Open Gaussian Splat scenes in the browser
 - Load `.ply` & `.sog` files
 - Point selection
-- Brush selection with radius and color threshold
+- Brush selection (color flood-fill, drag support, select-behind toggle, depth range slider)
+- Circle selection
 - Marquee selection
 - Lasso selection
 - Additive, subtractive, and normal selection modes
+- Copy selected splats
 - Paint brush
 - HSV adjustment for selected splats
-- Hide Tool
-- Move selected splats
+- Hide / unhide splats
+- Move, rotate, scale transform tools
+- Visualization modes: normal, particle cloud, random colors
 
 ## Getting Started
 
@@ -38,11 +41,29 @@ Open:
 http://127.0.0.1:5173
 ```
 
-Load a splat file:
+## URL Flags
+
+| Flag | Values | Default | Description |
+|------|--------|---------|-------------|
+| `?splat=<path>` | file path | demo scene | Load a `.ply` or `.sog` splat file |
+| `?quality=quality\|balanced\|gpu-balanced\|performance` | one of 4 | `performance` | Render quality / fidelity level |
+| `?optimized=1\|true\|yes\|on` | boolean | off | Enable GPU-optimized rendering (GPU chunk culling + depth binning) |
+
+Example:
 
 ```text
-http://127.0.0.1:5173/?splat=/supported/strawberry.ply
+http://127.0.0.1:5173/?splat=/supported/strawberry.ply&quality=balanced&optimized=1
 ```
+
+## Visualization Modes
+
+Three view modes toggleable via the circular buttons at the bottom center:
+
+| Mode | Description |
+|------|-------------|
+| **Normal** | Full gaussian splat rendering with per-splat colors |
+| **Particle cloud** (default) | Tiny fixed-size dots, no covariance scaling — lightweight overview |
+| **Random colors** | Per-chunk random colors — visualizes the spatial grid partitioning |
 
 ## Scripts
 
