@@ -94,7 +94,11 @@ export class GpuSorter {
     indirectArgsBuffer: GPUBuffer,
   ): void {
     if (this.splatCount === 0) { return; }
-    this.ensureBindGroup(positionBuffer);
+
+    if (!this.bindGroup || this.lastPositionBuffer !== positionBuffer) {
+      this.lastPositionBuffer = positionBuffer;
+      this.rebindGroup();
+    }
 
     this.device.queue.writeBuffer(
       this.configBuffer!,
@@ -134,7 +138,7 @@ export class GpuSorter {
       pass.dispatchWorkgroups(workgroups);
 
       this.swapBuffers();
-      this.ensureBindGroup(this.lastPositionBuffer!);
+      this.rebindGroup();
       pass.setBindGroup(1, this.bindGroup!);
     }
 
@@ -168,15 +172,12 @@ export class GpuSorter {
     this.destroyInternalBuffers();
   }
 
-  private ensureBindGroup(positionBuffer: GPUBuffer): void {
-    if (this.bindGroup && this.lastPositionBuffer === positionBuffer) { return; }
-    this.lastPositionBuffer = positionBuffer;
-
+  private rebindGroup(): void {
     this.bindGroup = this.device.createBindGroup({
       label: "SortBindGroup",
       layout: this.bindGroupLayout,
       entries: [
-        { binding: 0, resource: { buffer: positionBuffer } },
+        { binding: 0, resource: { buffer: this.lastPositionBuffer! } },
         { binding: 1, resource: { buffer: this.keysBuffer! } },
         { binding: 2, resource: { buffer: this.valuesBuffer! } },
         { binding: 3, resource: { buffer: this.tempKeysBuffer! } },
