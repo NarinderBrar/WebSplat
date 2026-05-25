@@ -4,6 +4,7 @@ import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { OrbitCamera } from "../camera/orbit-camera";
 import type { HsvAdjust, ScreenPoint, ScreenRect, SelectionMode } from "../editor/types";
 import { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
+import { ComputeSortPass } from "../passes/computeSortPass";
 import { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import { GpuTilePressurePass, type GpuTilePressureTelemetry } from "../passes/gpuTilePressurePass";
 import { IdPickingPass } from "../passes/idPickingPass";
@@ -33,6 +34,7 @@ export default class GaussianSplatViewer {
   private readonly gpuChunkCullPass: GpuChunkCullPass;
   private readonly gpuDepthBinPass: GpuDepthBinPass | null;
   private readonly gpuTilePressurePass: GpuTilePressurePass | null;
+  private readonly computeSortPass: ComputeSortPass | null;
   private readonly idPickingPass: IdPickingPass;
   private readonly debugStatsOverlay: DebugStatsOverlay;
   private readonly qualityMode: RenderQualityMode;
@@ -64,6 +66,7 @@ export default class GaussianSplatViewer {
     gpuChunkCullPass: GpuChunkCullPass,
     gpuDepthBinPass: GpuDepthBinPass | null,
     gpuTilePressurePass: GpuTilePressurePass | null,
+    computeSortPass: ComputeSortPass | null,
     idPickingPass: IdPickingPass,
     debugStatsOverlay: DebugStatsOverlay,
     qualityMode: RenderQualityMode,
@@ -78,6 +81,7 @@ export default class GaussianSplatViewer {
     this.gpuChunkCullPass = gpuChunkCullPass;
     this.gpuDepthBinPass = gpuDepthBinPass;
     this.gpuTilePressurePass = gpuTilePressurePass;
+    this.computeSortPass = computeSortPass;
     this.idPickingPass = idPickingPass;
     this.debugStatsOverlay = debugStatsOverlay;
     this.qualityMode = qualityMode;
@@ -160,6 +164,19 @@ export default class GaussianSplatViewer {
     }
 
     renderer.setSplatBuffer(splatBuffer);
+
+    const computeSortPass = createComputeSortPass(
+      gpu.device,
+      renderer.getCameraBindGroupLayout(),
+      world.getSplatData().count,
+      renderBackend,
+      optimized,
+    );
+
+    if (computeSortPass) {
+      renderer.setComputeSortPass(computeSortPass);
+    }
+
     const idPickingPass = new IdPickingPass(gpu.device, renderer.getCameraBindGroupLayout());
     idPickingPass.setSplatBuffer(splatBuffer);
 
@@ -172,6 +189,7 @@ export default class GaussianSplatViewer {
       gpuChunkCullPass,
       gpuDepthBinPass,
       gpuTilePressurePass,
+      computeSortPass,
       idPickingPass,
       new DebugStatsOverlay(),
       options.qualityMode ?? "performance",
@@ -210,6 +228,7 @@ export default class GaussianSplatViewer {
     this.moveTransformNode?.dispose();
     this.debugStatsOverlay.dispose();
     this.idPickingPass.dispose();
+    this.computeSortPass?.dispose();
     this.gpuTilePressurePass?.dispose();
     this.gpuDepthBinPass?.dispose();
     this.gpuChunkCullPass.dispose();
@@ -623,6 +642,12 @@ export default class GaussianSplatViewer {
       tileCulledSplats = visibleTelemetry.tileCulledSplats;
       tileTestedSplats = visibleTelemetry.tileTestedSplats;
       tileProtectedSplats = visibleTelemetry.tileProtectedSplats;
+    } else if (this.renderBackend === "gpuRadixSorted") {
+      const cullStart = performance.now();
+      this.world.updateVisibility(this.camera.getViewProjectionMatrix());
+      cpuCullMs = performance.now() - cullStart;
+      visibleIndexBuildMs = 0;
+      this.splatBuffer.setGpuRenderCountEstimate(this.world.getVisibility().splatCount);
     }
 
     this.renderer.render(this.camera.uniforms);
@@ -702,7 +727,9 @@ function getRenderScale(qualityMode: RenderQualityMode): number {
 }
 
 function getRenderBackend(qualityMode: RenderQualityMode): GpuRenderBackend {
-  void qualityMode;
+  if (qualityMode === "performance" || qualityMode === "gpu-balanced") {
+    return "gpuRadixSorted";
+  }
   return "cpuChunkBinned";
 }
 
@@ -789,6 +816,22 @@ function createGpuTilePressurePass(
     tileSize: 64,
     overloadThreshold: qualityMode === "performance" ? 6_000 : 12_000,
   });
+}
+
+function createComputeSortPass(
+  device: GPUDevice,
+  cameraBindGroupLayout: GPUBindGroupLayout,
+  splatCount: number,
+  renderBackend: GpuRenderBackend,
+  optimized: boolean,
+): ComputeSortPass | null {
+  if (!optimized || renderBackend !== "gpuRadixSorted") {
+    return null;
+  }
+
+  const pass = new ComputeSortPass(device, cameraBindGroupLayout);
+  pass.ensureBuffers(splatCount);
+  return pass;
 }
 
 function createGpuDepthBinPass(

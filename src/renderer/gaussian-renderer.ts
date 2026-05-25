@@ -2,6 +2,7 @@ import { CameraUniforms } from "../camera/camera-uniforms";
 import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import type { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import type { GpuTilePressurePass } from "../passes/gpuTilePressurePass";
+import type { ComputeSortPass } from "../passes/computeSortPass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 import RenderPipeline from "./render-pipeline";
@@ -33,6 +34,10 @@ export class GaussianRenderer {
 
   public setGpuTilePressurePass(pass: GpuTilePressurePass): void {
     this.pipeline.setGpuTilePressurePass(pass);
+  }
+
+  public setComputeSortPass(pass: ComputeSortPass): void {
+    this.pipeline.setComputeSortPass(pass);
   }
 
   public setQualityLevel(quality: number): void {

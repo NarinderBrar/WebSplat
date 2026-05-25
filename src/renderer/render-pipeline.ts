@@ -3,6 +3,7 @@ import { CameraUniforms } from "../camera/camera-uniforms";
 import type { GpuChunkCullPass } from "../passes/gpuChunkCullPass";
 import type { GpuDepthBinPass } from "../passes/gpuDepthBinPass";
 import type { GpuTilePressurePass } from "../passes/gpuTilePressurePass";
+import type { ComputeSortPass } from "../passes/computeSortPass";
 import { SplatBuffer } from "../splats/splatBuffer";
 import { GpuContext } from "./gpu-context";
 
@@ -17,6 +18,7 @@ export default class RenderPipeline {
   private gpuChunkCullPass: GpuChunkCullPass | null = null;
   private gpuDepthBinPass: GpuDepthBinPass | null = null;
   private gpuTilePressurePass: GpuTilePressurePass | null = null;
+  private computeSortPass: ComputeSortPass | null = null;
   private splatCount = 0;
 
   constructor(gpu: GpuContext) {
@@ -205,6 +207,10 @@ export default class RenderPipeline {
     this.gpuTilePressurePass = pass;
   }
 
+  setComputeSortPass(pass: ComputeSortPass): void {
+    this.computeSortPass = pass;
+  }
+
   private vizMode = 0;
   private splatScale = 0.72;
   private maxSplatVariance = 0.0035;
@@ -238,6 +244,23 @@ export default class RenderPipeline {
     viewportHeight: number,
   ): void {
     const cameraBindGroup = cameraUniforms.getBindGroup();
+
+    if (this.computeSortPass) {
+      const positionBuffer = this.splatBuffer?.getPositionBuffer();
+      const visibleSplatIndicesBuffer = this.splatBuffer?.getVisibleSplatIndicesBuffer();
+      const indirectArgsBuffer = this.splatBuffer?.getIndirectArgsBuffer();
+
+      if (positionBuffer && visibleSplatIndicesBuffer && indirectArgsBuffer) {
+        this.computeSortPass.encode(
+          encoder,
+          cameraUniforms,
+          positionBuffer,
+          visibleSplatIndicesBuffer,
+          indirectArgsBuffer,
+        );
+      }
+    }
+
     this.gpuChunkCullPass?.encode(encoder, cameraUniforms, viewportHeight);
     this.gpuDepthBinPass?.setViewportHeight(viewportHeight);
     this.gpuDepthBinPass?.encode(encoder, cameraUniforms);
